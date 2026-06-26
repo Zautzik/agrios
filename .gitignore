@@ -2,3 +2,7 @@ __pycache__/
 .venv/
 *.pyc
 .env
+*.db
+*.db-shm
+*.db-wal
+langfuse-server/

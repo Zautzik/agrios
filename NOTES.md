@@ -1,0 +1,10 @@
+What I built: a LangGraph ReAct-style agent on a local Ollama model, with five farm-management tools (weather, crop calendar, field status, task logging, pending tasks) and SQLite-backed checkpointing so state survives process restarts instead of resetting per run.
+
+Concepts that clicked this week:
+- Modeling the agent loop as an explicit graph rather than a black-box `.run()` call: an `agent` node decides, a conditional edge inspects `last_message.tool_calls` and routes to `tools` only when one exists, and `tools` always routes back to `agent`. Making the control flow a graph instead of hidden framework logic is what made "agent loop" stop being an abstraction.
+- The `Annotated[list, add_messages]` reducer: state updates in LangGraph are merged through whatever reducer the field is annotated with, not overwritten. Without it, each node's `{"messages": [...]}` return would replace the message list instead of appending to it — silently destroying multi-turn context with no error raised.
+- `thread_id`-scoped checkpointing: swapping `MemorySaver` for `SqliteSaver` separates "what state looks like" from "where state lives," so persistence became a one-line storage swap rather than a rewrite.
+
+The gotcha: lost time debugging a `NameError` against code that no longer had the bug — the file on disk was already fixed, but I was executing it through a stale interpreter process, not the saved version. The actual lesson: when behavior doesn't match the code you're reading, check what's actually running before you re-check the code.
+
+Open question heading into Saturday: I could see the agent's final answer, but not its intermediate reasoning — which tool it picked, why, and what arguments it passed before I get the printed result. Closed this the next day by self-hosting Langfuse and wiring a `CallbackHandler` into the LangGraph invoke call, which gave full per-node trace spans (model input/output, tool name, args, and result) instead of inferring behavior from the final printout.
