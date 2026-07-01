@@ -1,7 +1,6 @@
 from langchain_ollama import ChatOllama
-from langchain_ollama import ChatOllama
+import httpx
 from ollama import ResponseError
-from langchain.agents import create_agent
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph.message import add_messages
@@ -17,12 +16,14 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.pool import QueuePool
 from sqlalchemy.exc import SQLAlchemyError
 import logging
+from pathlib import Path
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-engine = create_engine("sqlite:///agrios.db", poolclass=QueuePool, pool_size=5, max_overflow=10)
+BASE_DIR = Path(__file__).parent
+engine = create_engine(f"sqlite:///{BASE_DIR}/agrios.db", poolclass=QueuePool, pool_size=5, max_overflow=10)
 
 def init_db():
     with engine.begin() as conn:
@@ -152,21 +153,22 @@ graph.add_edge(START, "agent")
 graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
 graph.add_edge("tools", "agent")
 
-with SqliteSaver.from_conn_string("checkpoints.db") as memory:
-    app = graph.compile(checkpointer=memory)
-    while True:
-        user_input = input("You: ")
-        if user_input.lower() == "exit":
-            break
-        try:
-            result = app.invoke(
-                {"messages": [("user", user_input)]},
-                config={**config, "callbacks": [langfuse_handler], "recursion_limit": 10}
-            )
-            print(result["messages"][-1].content)
-        except GraphRecursionError:
-            logger.error("Hit recursion limit (10) for thread %s", config["configurable"]["thread_id"])
-            print("Sorry, I got stuck looping on that one — try rephrasing your request.")
-        except (ResponseError, ConnectionError) as e:
-            logger.exception("Ollama call failed")
-            print(f"Couldn't get a response from the model: {e}")
+if __name__ == "__main__":
+    with SqliteSaver.from_conn_string(str(BASE_DIR / "checkpoints.db")) as memory:
+        app = graph.compile(checkpointer=memory)
+        while True:
+            user_input = input("You: ")
+            if user_input.lower() == "exit":
+                break
+            try:
+                result = app.invoke(
+                    {"messages": [("user", user_input)]},
+                    config={**config, "callbacks": [langfuse_handler], "recursion_limit": 10}
+                )
+                print(result["messages"][-1].content)
+            except GraphRecursionError:
+                logger.error("Hit recursion limit (10) for thread %s", config["configurable"]["thread_id"])
+                print("Sorry, I got stuck looping on that one — try rephrasing your request.")
+            except (ResponseError, ConnectionError, httpx.ConnectError) as e:
+                logger.exception("Ollama call failed")
+                print(f"Couldn't get a response from the model: {e}")
