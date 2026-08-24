@@ -58,6 +58,26 @@ A few choices here were deliberate, not defaults — worth knowing why if you're
 
 `get_weather_forecast` and `lookup_crop_calendar` currently return fixture data — they're shaped to be swapped for real API calls without changing their interface.
 
+## Evaluation
+
+A 30-case parametrized suite (`test_agent.py`, run via `pytest -m slow`) checks the live model
+across four categories: tool selection (15 cases), argument correctness (8), multi-step task
+completion (5), and no-tool-needed (2). It's gated behind a marker so a plain `pytest` run stays
+fast and never touches Ollama; the full suite takes ~25 minutes on CPU against `qwen2.5:7b`.
+
+**Reconciled result** (original run + one test-bug fix, not a single re-run): **28/30 cases
+correct.**
+- 1 confirmed, reproducible gap: the literal phrasing *"What's the weather forecast for
+  field-1?"* — wording closest to the tool's own docstring — doesn't trigger
+  `get_weather_forecast` (3/3 across independent isolated runs), while paraphrases of the same
+  request reliably do. Not yet fixed.
+- 1 open question: a single recursion-limit hit on a frost-risk question didn't reproduce on
+  retry (1 fail, 1 pass across everything actually run) — too little data to call it resolved or
+  call it a bug, so it's a watch item.
+
+See [NOTES.md](NOTES.md) for the full investigation, including a hypothesis (cold-start effect)
+that got tested and killed before either finding was written down.
+
 ## Stack
 
 - [LangGraph](https://github.com/langchain-ai/langgraph) — agent control flow as an explicit graph

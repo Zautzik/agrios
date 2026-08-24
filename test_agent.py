@@ -3,6 +3,8 @@ import pytest
 from main import graph
 from langgraph.checkpoint.memory import MemorySaver
 
+pytestmark = pytest.mark.slow
+
 @pytest.fixture(scope="session")
 def app():
     return graph.compile(checkpointer=MemorySaver())
@@ -58,7 +60,7 @@ ARGUMENT_CASES = [
     ("Weather for field-2 please",                   "get_weather_forecast", {"location": "field-2"}, {}),
     ("Forecast for field-1 over the next week",      "get_weather_forecast", {"location": "field-1"}, {}),
     ("When to plant wheat in the central valley",    "lookup_crop_calendar", {"crop": "wheat"},        {}),
-    ("Harvest window for potatoes in Chile",         "lookup_crop_calendar", {"crop": "potato"},       {}),
+    ("Harvest window for potatoes in Chile",         "lookup_crop_calendar", {},                       {"crop": "potato"}),
 ]
 
 @pytest.mark.parametrize(
@@ -115,4 +117,4 @@ def test_no_tool_needed(app, user_input):
     assert tool_calls == [], (
         f"expected no tool calls, model called {[c['name'] for c in tool_calls]}"
     )
-pytestmark = pytest.mark.slow
+
