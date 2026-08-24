@@ -1,5 +1,8 @@
 # Agrios
 
+[![CI](https://github.com/Zautzik/agrios/actions/workflows/ci.yml/badge.svg)](https://github.com/Zautzik/agrios/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A LangGraph ReAct-style agent for farm operations, running entirely on a local Ollama model, with SQL-backed persistence, full tracing, and explicit failure handling at every external boundary.
 
 This is a learning project, built incrementally and documented as it went — see [NOTES.md](NOTES.md) for the build log, including a debugging story and the engineering tradeoffs made along the way.
@@ -12,6 +15,25 @@ A CLI agent that answers questions about weather, crop calendars, and field/task
 You: What's the weather forecast for field-1, and should I log an irrigation task?
 [agent reasons -> calls get_weather_forecast -> reasons -> calls log_task -> responds]
 ```
+
+## Demo
+
+A real, unedited transcript from a live run against `qwen2.5:7b` — a plain conversational turn followed by a tool-calling turn resolved against the actual SQLite-backed field data:
+
+```
+You: Hi, who are you?
+Hello! I'm Qwen, an AI assistant created by Alibaba Cloud. My main goal is to help you with
+any questions or tasks related to agriculture, weather forecasts, and more. How can I assist
+you today? Whether you need information about planting, managing fields, or anything else
+related to your farming activities, feel free to ask!
+
+You: What is the status of field-1?
+The current status of field-1 is that it contains potatoes which are currently growing.
+
+Would you like to log a task for field-1 or need more information about the crop?
+```
+
+(`query_field_status(field_id="field-1")` was called under the hood and returned the real row from `agrios.db`.)
 
 ## Architecture
 
@@ -121,5 +143,6 @@ Type a message at the `You:` prompt; type `exit` to quit. Tables and seed data (
 ## Known limitations
 
 - `get_weather_forecast` and `lookup_crop_calendar` return fixture data, not live API results.
-- Single `thread_id` ("1") is hardcoded — no per-user session handling.
+- Single `thread_id` ("1") is hardcoded — no per-user session handling. In practice this also means history only grows: after ~2 months of development sessions the persisted thread had accumulated 25+ messages, and every subsequent turn replays all of it through the model before generating — confirmed to noticeably slow interactive turns (30s–2min on CPU) that would otherwise be quick. No trimming/summarization is implemented yet.
 - `qwen2.5:7b` needs ~4.3 GB free RAM to load; on a constrained machine running Docker simultaneously, this can fail — handled gracefully (see Design decisions) rather than crashing, but worth knowing going in.
+- Langfuse trace export is currently failing in local verification (`Read timed out`, then `404 Not Found` from the OTLP endpoint) — traces are not being recorded even though the agent itself runs fine, since export happens on a non-blocking background path. Root cause not yet investigated; most likely an SDK/server version mismatch on the self-hosted instance.
