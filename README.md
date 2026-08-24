@@ -2,10 +2,26 @@
 
 [![CI](https://github.com/Zautzik/agrios/actions/workflows/ci.yml/badge.svg)](https://github.com/Zautzik/agrios/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](pyproject.toml)
 
-A LangGraph ReAct-style agent for farm operations, running entirely on a local Ollama model, with SQL-backed persistence, full tracing, and explicit failure handling at every external boundary.
+**A LangGraph ReAct-style agent for farm operations, running entirely on a local Ollama model — SQL-backed persistence, full tracing, and explicit failure handling at every external boundary. Scored 28/30 on a 30-case live-model eval suite** ([details](#evaluation)).
 
-This is a learning project, built incrementally and documented as it went — see [NOTES.md](NOTES.md) for the build log, including a debugging story and the engineering tradeoffs made along the way.
+```
+                ┌──────────┐
+   START ─────► │  agent   │ ◄────────┐
+                └────┬─────┘          │
+                     │  tool_calls?   │
+              ┌──────┴──────┐         │
+             yes            no        │
+              ▼              ▼        │
+         ┌─────────┐       END        │
+         │  tools  │ ────────────────-┘
+         └─────────┘
+```
+
+Full build log → [NOTES.md](NOTES.md) &nbsp;·&nbsp; From-first-principles study guide → [docs/Masterclass-Agrios.md](docs/Masterclass-Agrios.md)
+
+This is a learning project, built incrementally and documented as it went — including a real debugging story and the engineering tradeoffs made along the way.
 
 ## What it does
 
@@ -37,21 +53,7 @@ Would you like to log a task for field-1 or need more information about the crop
 
 ## Architecture
 
-```
-                ┌──────────┐
-   START ─────► │  agent   │ ◄────────┐
-                └────┬─────┘          │
-                     │                │
-         tool_calls? │                │
-            ┌────────┴────────┐       │
-            │                 │       │
-           yes                no      │
-            │                 │       │
-            ▼                 ▼       │
-       ┌─────────┐          END       │
-       │  tools  │ ─────────────────────┘
-       └─────────┘
-```
+The graph shown at the top of this README, in full:
 
 - **`agent` node** — calls the Ollama model (bound to 5 tools) with the running message history.
 - **`tools` node** — executes whichever tool(s) the model requested, returns results as `ToolMessage`s.

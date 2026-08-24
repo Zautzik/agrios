@@ -9,7 +9,7 @@
 > actually have. The eval suite has since been run for real: 28/30 on reconciliation, one
 > confirmed reproducible gap, one open question — see war story #7 in Part 3.
 >
-> Companion to [NOTES.md](NOTES.md) (the build log, in the moment) and [README.md](README.md)
+> Companion to [NOTES.md](../NOTES.md) (the build log, in the moment) and [README.md](../README.md)
 > (the reference). This document is the third angle: not what happened or what it does, but
 > *why the ideas underneath it work*, explained as if teaching them to someone who's never
 > seen an agent framework before.
