@@ -28,9 +28,21 @@ add_library(agrios_bridge SHARED
 target_include_directories(agrios_bridge PUBLIC include)
 target_link_libraries(agrios_bridge PUBLIC rt Threads::Threads)
 
-# Demo: the "C++ motor control" consumer.
+# Demo: the "C++ motor control" consumer -- simple, non-real-time, verifies
+# the bridge itself (see cpp/README.md and NOTES.md for that verification).
 add_executable(motor_control_consumer src/motor_control_consumer.cpp)
 target_link_libraries(motor_control_consumer PRIVATE agrios_bridge)
+
+# The actual PREEMPT_RT / ROS 2 real-time-guideline-compliant 1 kHz control
+# loop -- see motor_control_rt_loop.cpp's top comment and cpp/README.md.
+# -Wl,-z,now forces eager (load-time) symbol binding instead of lazy binding:
+# without it, the *first* call to a given dynamically-linked function from
+# inside the RT hot loop pays the cost of the dynamic linker resolving that
+# symbol on demand, which can itself fault in pages -- exactly the kind of
+# non-deterministic first-touch latency this loop exists to eliminate.
+add_executable(motor_control_rt_loop src/motor_control_rt_loop.cpp)
+target_link_libraries(motor_control_rt_loop PRIVATE agrios_bridge Threads::Threads)
+target_link_options(motor_control_rt_loop PRIVATE -Wl,-z,now)
 
 # Correctness test for the lock-free algorithm itself (no shared memory
 # involved -- two threads in one process). Run manually with TSan for real
