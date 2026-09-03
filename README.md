@@ -82,6 +82,19 @@ A few choices here were deliberate, not defaults — worth knowing why if you're
 
 `get_weather_forecast` and `lookup_crop_calendar` currently return fixture data — they're shaped to be swapped for real API calls without changing their interface.
 
+## Perception/motor-control bridge (`cpp/`)
+
+A standalone lock-free single-producer/single-consumer ring buffer over POSIX shared memory,
+carrying 6-DoF pose data between a Python perception process and a C++ motor-control process —
+no lock, no kernel round-trip on the hot path. Not yet wired into the LangGraph agent above; it's
+an independent subsystem in this repo, built for a future robotics-hardware target (Raspberry Pi
+/ Jetson) rather than the current CLI/laptop setup. Verified end to end in a Linux container: a
+5,000,000-item concurrent stress test with zero lost/duplicated/reordered items, and a real
+cross-process run (separate C++ and Python processes, genuine shared memory, not simulated) with
+20/20 poses arriving correctly. See [cpp/README.md](cpp/README.md) for the design, the memory-
+ordering contract, and how to build and run it — requires Linux/macOS (or a container), since
+POSIX shared memory doesn't exist on native Windows.
+
 ## Evaluation
 
 A 30-case parametrized suite (`test_agent.py`, run via `pytest -m slow`) checks the live model
