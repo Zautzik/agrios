@@ -22,6 +22,14 @@
 //     get state out of an RT update() loop without letting a logger's I/O
 //     jitter leak into the control loop's timing.
 //
+// Also publishes synthetic joint-angle telemetry each iteration over the
+// separate joint-telemetry shared-memory channel (see joint_state.hpp),
+// consumed by e.g. a ReadJointStates tool on the perception/monitoring side.
+// There's no real hardware behind this yet, so the "joint angles" are a
+// fixed, clearly-synthetic waveform -- a stand-in for real encoder feedback,
+// same honesty as the control_output stand-in below. What's real is the
+// non-blocking push() pattern it's exercising, not the numbers.
+//
 // Usage: motor_control_rt_loop [--core N] [--priority P] [--iterations N]
 // Requires CAP_SYS_NICE and CAP_IPC_LOCK (or root) -- e.g. under Docker:
 //   docker run --cap-add=SYS_NICE --cap-add=IPC_LOCK ...
@@ -31,6 +39,7 @@
 
 #include <atomic>
 #include <cerrno>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -90,6 +99,7 @@ std::int64_t diff_ns(const timespec& a, const timespec& b) {
 struct RtLoopArgs {
     agrios::rt::RtThreadConfig rt_config;
     AgriosBridgeHandle* bridge = nullptr;
+    AgriosJointBridgeHandle* joint_bridge = nullptr;
     TelemetryRing* telemetry = nullptr;
     std::optional<std::uint64_t> max_iterations;
 };
@@ -152,7 +162,8 @@ void* rt_thread_main(void* arg_ptr) {
         // whatever this project's motor hardware eventually needs): a fixed,
         // bounded amount of work operating only on stack values, same as
         // the real thing would need to be to stay allocation-free here.
-        volatile double control_output = have_pose ? (last_pose.x + last_pose.y + last_pose.z) : 0.0;
+        volatile double control_output =
+            have_pose ? (last_pose.tvec[0] + last_pose.tvec[1] + last_pose.tvec[2]) : 0.0;
         (void)control_output;
 
         // Telemetry out: push() is O(1), wait-free, and never allocates or
@@ -162,6 +173,19 @@ void* rt_thread_main(void* arg_ptr) {
         // one would not be.
         TelemetrySample sample{iteration, jitter_ns, jitter_ns > kOverrunThresholdNs, have_pose, last_pose};
         args.telemetry->push(sample);
+
+        // Synthetic joint-angle telemetry, published to a separate reader
+        // process over shared memory (see the file-level comment for why
+        // these numbers aren't real). std::sin is bounded-time and
+        // allocation-free -- fine to call here, unlike the things this loop
+        // actually bans (malloc/new/push_back/std::cout).
+        const double phase = static_cast<double>(iteration) * 0.01;
+        AgriosJointState6 joint_state{};
+        for (int j = 0; j < 6; ++j) {
+            joint_state.joint_angles_rad[j] = 0.3 * std::sin(phase + j * 0.5);
+        }
+        joint_state.timestamp_ns = now.tv_sec * 1'000'000'000LL + now.tv_nsec;
+        agrios_joint_bridge_push(args.joint_bridge, &joint_state);
 
         ++iteration;
         if (args.max_iterations.has_value() && iteration >= *args.max_iterations) {
@@ -230,7 +254,19 @@ int main(int argc, char** argv) {
 
     AgriosBridgeHandle* bridge = agrios_bridge_open(agrios::kDefaultShmName, /*is_owner=*/1);
     if (bridge == nullptr) {
-        std::cerr << "failed to open shared-memory bridge\n";
+        std::cerr << "failed to open pose shared-memory bridge\n";
+        return 1;
+    }
+
+    // This process is the owner of the joint-telemetry channel too: it's the
+    // producer, and the one process guaranteed to be running whenever there's
+    // telemetry to report. Readers (e.g. a ReadJointStates tool) attach as
+    // non-owners.
+    AgriosJointBridgeHandle* joint_bridge =
+        agrios_joint_bridge_open(agrios::kDefaultJointTelemetryShmName, /*is_owner=*/1);
+    if (joint_bridge == nullptr) {
+        std::cerr << "failed to open joint-telemetry shared-memory bridge\n";
+        agrios_bridge_close(bridge);
         return 1;
     }
 
@@ -239,6 +275,7 @@ int main(int argc, char** argv) {
     RtLoopArgs args;
     args.rt_config = rt_config;
     args.bridge = bridge;
+    args.joint_bridge = joint_bridge;
     args.telemetry = telemetry.get();
     args.max_iterations = max_iterations;
 
@@ -253,6 +290,7 @@ int main(int argc, char** argv) {
         std::cerr << "pthread_create failed: " << std::strerror(errno) << '\n';
         g_running.store(false, std::memory_order_relaxed);
         monitor.join();
+        agrios_joint_bridge_close(joint_bridge);
         agrios_bridge_close(bridge);
         return 1;
     }
@@ -262,6 +300,7 @@ int main(int argc, char** argv) {
     g_running.store(false, std::memory_order_relaxed);
     monitor.join();
 
+    agrios_joint_bridge_close(joint_bridge);
     agrios_bridge_close(bridge);
     return g_rt_thread_failed.load(std::memory_order_relaxed) ? 1 : 0;
 }

@@ -1,7 +1,11 @@
 #ifndef AGRIOS_BRIDGE_C_API_H
 #define AGRIOS_BRIDGE_C_API_H
 
-/* Plain-C ABI over SharedRingBuffer<Pose6D, kBridgeCapacity>.
+/* Plain-C ABI over two independent shared-memory channels:
+ *   - the pose bridge:      SharedRingBuffer<Pose6D, kBridgeCapacity>
+ *   - the joint telemetry:  SharedRingBuffer<JointState6, kJointTelemetryCapacity>
+ * See bridge_config.hpp for their names/capacities and pose6d.hpp /
+ * joint_state.hpp for the payload layouts.
  *
  * Why this exists instead of letting Python poke the shared-memory bytes
  * directly: push()/pop()'s correctness depends on real acquire/release
@@ -16,9 +20,10 @@
  * implementation of the protocol, not two that have to be kept in sync by
  * hand.
  *
- * Capacity is fixed at compile time (kBridgeCapacity, in bridge_c_api.cpp)
- * because a C ABI can't carry a template parameter; every process using this
- * library links against the same build and therefore agrees on it.
+ * Two channels, two small sets of near-identical functions rather than one
+ * generic void*-based API: the C ABI can't carry a template parameter, and a
+ * type-erased API would trade compile-time payload-type safety for avoiding
+ * ~15 lines of duplication. Not worth it for two types.
  */
 
 #include <stdint.h>
@@ -27,13 +32,11 @@
 extern "C" {
 #endif
 
+/* ---- Pose bridge: perception -> motor control ---- */
+
 typedef struct AgriosPose6D {
-    double x;
-    double y;
-    double z;
-    double pitch;
-    double yaw;
-    double roll;
+    double tvec[3];       /* translation vector [tx, ty, tz], meters */
+    double rvec[3];       /* Rodrigues rotation vector [rx, ry, rz], radians */
     int64_t timestamp_ns; /* monotonic clock, nanoseconds */
 } AgriosPose6D;
 
@@ -56,6 +59,31 @@ int agrios_bridge_push(AgriosBridgeHandle* handle, const AgriosPose6D* pose);
 
 /* Returns 1 on success (out is filled in), 0 if the ring buffer is empty. */
 int agrios_bridge_pop(AgriosBridgeHandle* handle, AgriosPose6D* out);
+
+/* ---- Joint telemetry: motor control -> monitoring/perception ---- */
+
+typedef struct AgriosJointState6 {
+    double joint_angles_rad[6];
+    int64_t timestamp_ns;
+} AgriosJointState6;
+
+typedef struct AgriosJointBridgeHandle AgriosJointBridgeHandle; /* opaque */
+
+/* Same open/create semantics as agrios_bridge_open -- see above. In the
+ * normal topology the motor-control RT loop is the owner (it's the producer
+ * and the one process guaranteed to be running whenever there's telemetry to
+ * report), and readers (e.g. a ReadJointStates tool) attach as non-owners. */
+AgriosJointBridgeHandle* agrios_joint_bridge_open(const char* shm_name, int is_owner);
+void agrios_joint_bridge_close(AgriosJointBridgeHandle* handle);
+
+/* Returns 1 on success, 0 if the ring buffer is full. */
+int agrios_joint_bridge_push(AgriosJointBridgeHandle* handle, const AgriosJointState6* state);
+
+/* Returns 1 on success (out is filled in), 0 if the ring buffer is empty.
+ * Never blocks the writer -- SPSCRingBuffer's pop() is wait-free by
+ * construction (see spsc_ring_buffer.hpp), so a reader calling this, however
+ * slowly or however often, can never stall the RT loop's push()es. */
+int agrios_joint_bridge_pop(AgriosJointBridgeHandle* handle, AgriosJointState6* out);
 
 #ifdef __cplusplus
 } /* extern "C" */

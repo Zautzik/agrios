@@ -5,32 +5,44 @@
 #include <iostream>
 
 #include "agrios/bridge_config.hpp"
+#include "agrios/joint_state.hpp"
 #include "agrios/pose6d.hpp"
 #include "agrios/shared_ring_buffer.hpp"
 
 namespace {
 
-using Bridge = agrios::SharedRingBuffer<agrios::Pose6D, agrios::kBridgeCapacity>;
+using PoseBridge = agrios::SharedRingBuffer<agrios::Pose6D, agrios::kBridgeCapacity>;
+using JointBridge = agrios::SharedRingBuffer<agrios::JointState6, agrios::kJointTelemetryCapacity>;
 
 static_assert(sizeof(AgriosPose6D) == sizeof(agrios::Pose6D),
               "AgriosPose6D (C ABI) and agrios::Pose6D (C++ implementation) "
               "have drifted apart -- keep their fields identical in order "
               "and type");
+static_assert(sizeof(AgriosJointState6) == sizeof(agrios::JointState6),
+              "AgriosJointState6 (C ABI) and agrios::JointState6 (C++ "
+              "implementation) have drifted apart -- keep their fields "
+              "identical in order and type");
 
 }  // namespace
 
 struct AgriosBridgeHandle {
-    Bridge bridge;
+    PoseBridge bridge;
+};
+
+struct AgriosJointBridgeHandle {
+    JointBridge bridge;
 };
 
 extern "C" {
+
+/* ---- Pose bridge ---- */
 
 AgriosBridgeHandle* agrios_bridge_open(const char* shm_name, int is_owner) {
     if (shm_name == nullptr) {
         return nullptr;
     }
     try {
-        return new AgriosBridgeHandle{Bridge(shm_name, is_owner != 0)};
+        return new AgriosBridgeHandle{PoseBridge(shm_name, is_owner != 0)};
     } catch (const std::exception& e) {
         std::cerr << "agrios_bridge_open failed: " << e.what() << '\n';
         return nullptr;
@@ -55,6 +67,38 @@ int agrios_bridge_pop(AgriosBridgeHandle* handle, AgriosPose6D* out) {
         return 0;
     }
     auto& typed_out = *reinterpret_cast<agrios::Pose6D*>(out);
+    return handle->bridge.get().pop(typed_out) ? 1 : 0;
+}
+
+/* ---- Joint telemetry ---- */
+
+AgriosJointBridgeHandle* agrios_joint_bridge_open(const char* shm_name, int is_owner) {
+    if (shm_name == nullptr) {
+        return nullptr;
+    }
+    try {
+        return new AgriosJointBridgeHandle{JointBridge(shm_name, is_owner != 0)};
+    } catch (const std::exception& e) {
+        std::cerr << "agrios_joint_bridge_open failed: " << e.what() << '\n';
+        return nullptr;
+    }
+}
+
+void agrios_joint_bridge_close(AgriosJointBridgeHandle* handle) { delete handle; }
+
+int agrios_joint_bridge_push(AgriosJointBridgeHandle* handle, const AgriosJointState6* state) {
+    if (handle == nullptr || state == nullptr) {
+        return 0;
+    }
+    const auto& typed_state = *reinterpret_cast<const agrios::JointState6*>(state);
+    return handle->bridge.get().push(typed_state) ? 1 : 0;
+}
+
+int agrios_joint_bridge_pop(AgriosJointBridgeHandle* handle, AgriosJointState6* out) {
+    if (handle == nullptr || out == nullptr) {
+        return 0;
+    }
+    auto& typed_out = *reinterpret_cast<agrios::JointState6*>(out);
     return handle->bridge.get().pop(typed_out) ? 1 : 0;
 }
 

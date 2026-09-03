@@ -55,7 +55,7 @@ Would you like to log a task for field-1 or need more information about the crop
 
 The graph shown at the top of this README, in full:
 
-- **`agent` node** — calls the Ollama model (bound to 5 tools) with the running message history.
+- **`agent` node** — calls the Ollama model (bound to 7 tools) with the running message history.
 - **`tools` node** — executes whichever tool(s) the model requested, returns results as `ToolMessage`s.
 - **Conditional edge** — routes back to `tools` only while the model keeps requesting them; exits to `END` the moment it answers directly.
 - **Checkpointing** — `SqliteSaver` persists graph state per `thread_id` to `checkpoints.db`, so multi-turn memory survives a process restart, not just a single run.
@@ -79,21 +79,31 @@ A few choices here were deliberate, not defaults — worth knowing why if you're
 | `query_field_status(field_id)` | Current crop and status for a field |
 | `log_task(field_id, description)` | Records a pending task against a field |
 | `get_pending_tasks()` | Lists all pending tasks across fields |
+| `submit_spatial_intent(tvec, rvec)` | Sends a 6D target pose to the C++ motor-control bridge (`spatial_tools.py`) |
+| `read_joint_states()` | Reads live joint-angle telemetry from the motor-control bridge (`spatial_tools.py`) |
 
-`get_weather_forecast` and `lookup_crop_calendar` currently return fixture data — they're shaped to be swapped for real API calls without changing their interface.
+`get_weather_forecast` and `lookup_crop_calendar` currently return fixture data — they're shaped to be swapped for real API calls without changing their interface. The last two are defined in [spatial_tools.py](spatial_tools.py), not `main.py` — see below.
 
-## Perception/motor-control bridge (`cpp/`)
+## Perception/motor-control bridge (`cpp/`, `spatial_tools.py`)
 
-A standalone lock-free single-producer/single-consumer ring buffer over POSIX shared memory,
-carrying 6-DoF pose data between a Python perception process and a C++ motor-control process —
-no lock, no kernel round-trip on the hot path. Not yet wired into the LangGraph agent above; it's
-an independent subsystem in this repo, built for a future robotics-hardware target (Raspberry Pi
-/ Jetson) rather than the current CLI/laptop setup. Verified end to end in a Linux container: a
-5,000,000-item concurrent stress test with zero lost/duplicated/reordered items, and a real
-cross-process run (separate C++ and Python processes, genuine shared memory, not simulated) with
-20/20 poses arriving correctly. See [cpp/README.md](cpp/README.md) for the design, the memory-
-ordering contract, and how to build and run it — requires Linux/macOS (or a container), since
-POSIX shared memory doesn't exist on native Windows.
+Two lock-free single-producer/single-consumer ring buffers over POSIX shared memory — no lock, no
+kernel round-trip on the hot path — carrying 6D target poses from perception to a C++ motor-control
+loop, and joint-angle telemetry back the other way. The motor-control side is a real PREEMPT_RT/
+ROS 2-guideline 1 kHz loop (`mlockall`, `SCHED_FIFO` priority 99, CPU-pinned, zero allocation in the
+hot loop), built for a future robotics-hardware target (Raspberry Pi / Jetson) rather than the
+current CLI/laptop setup — see [cpp/README.md](cpp/README.md) for the design, the memory-ordering
+contract, and the honest accounting of what was verified versus what depends on real PREEMPT_RT
+hardware to mean anything.
+
+It **is** wired into the agent above: `submit_spatial_intent` and `read_joint_states`
+([spatial_tools.py](spatial_tools.py)) are two of the 7 tools bound to the model, each degrading to
+a plain string result instead of crashing the agent when the C++ side isn't available — true by
+default on this project's own Windows dev machine, since POSIX shared memory doesn't exist there.
+The full loop was verified for real in a Linux container: the actual `@tool`-decorated functions,
+not a mock, pushed a pose into a live RT loop process and read back its telemetry, confirmed by the
+RT loop's own log switching from `pose=no` to `pose=yes` at the exact iteration the push landed. See
+[cpp/README.md](cpp/README.md) for the full verification writeup, including the 5,000,000-item
+concurrency stress test and the cross-process bridge demos this integration sits on top of.
 
 ## Evaluation
 

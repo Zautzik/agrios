@@ -12,6 +12,13 @@ namespace agrios {
 // links against it.
 inline constexpr std::size_t kBridgeCapacity = 1024;
 
+// perception -> motor control: target poses (Pose6D).
 inline constexpr const char* kDefaultShmName = "/agrios_pose_bridge";
+
+// motor control -> monitoring/perception: joint-state telemetry (JointState6).
+// A separate segment, not a second producer on the pose segment -- see
+// joint_state.hpp for why this has to be its own channel.
+inline constexpr std::size_t kJointTelemetryCapacity = 1024;
+inline constexpr const char* kDefaultJointTelemetryShmName = "/agrios_joint_telemetry";
 
 }  // namespace agrios

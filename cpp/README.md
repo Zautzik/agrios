@@ -21,20 +21,25 @@ purpose, rather than silently producing a binary that can't work.
 ```
 include/agrios/
   spsc_ring_buffer.hpp   the lock-free algorithm itself (template, header-only)
-  pose6d.hpp             the payload struct (6D pose + monotonic timestamp)
+  pose6d.hpp             pose payload: translation + Rodrigues rotation vector + timestamp
+  joint_state.hpp        joint-telemetry payload: 6 joint angles + timestamp
   shared_ring_buffer.hpp POSIX shm_open/mmap wrapper: places a ring buffer in shared memory
-  bridge_config.hpp      the one place capacity/shm-name are defined, shared by every caller
-  bridge_c_api.h         plain-C ABI over SharedRingBuffer<Pose6D, ...> -- see below
+  bridge_config.hpp      the one place channel names/capacities are defined, shared by every caller
+  bridge_c_api.h         plain-C ABI over both channels -- see below
   rt_thread.hpp          PREEMPT_RT thread setup: mlockall, SCHED_FIFO, CPU affinity -- see below
 src/
   bridge_c_api.cpp       implementation of the C API, built as libagrios_bridge.so
-  motor_control_consumer.cpp   demo: simple, non-real-time -- verifies the bridge itself
+  motor_control_consumer.cpp   demo: simple, non-real-time -- verifies the pose bridge itself
   motor_control_rt_loop.cpp    the real-time-compliant 1 kHz control loop -- see below
 python/
-  shared_ring_buffer.py  ctypes wrapper calling into libagrios_bridge.so
-  perception_producer_demo.py  demo: the Python "perception" side
+  shared_ring_buffer.py  ctypes wrapper calling into libagrios_bridge.so (both channels)
+  perception_producer_demo.py    demo: the Python "perception" side of the pose channel
+  joint_state_reader_demo.py     demo: reads joint telemetry the RT loop publishes
 tests/
   spsc_ring_buffer_test.cpp    concurrency correctness test (see below)
+
+../spatial_tools.py       LangGraph tools (submit_spatial_intent, read_joint_states)
+                           wiring the Agrios agent itself to both channels -- see below
 ```
 
 ## Why a compiled C API instead of letting Python poke the shared bytes directly
@@ -182,6 +187,76 @@ default even to a root user inside the container):
   actually-isolated core is a prerequisite for treating any latency number
   from this loop as meaningful.
 
+## Two channels, and the pose representation
+
+There are two independent shared-memory channels, not one bidirectional
+one, because they're two genuinely separate producer/consumer pairs and
+`SPSCRingBuffer` is single-producer/single-consumer by design:
+
+- `/agrios_pose_bridge` (`Pose6D`) — perception → motor control. Translation
+  vector + Rodrigues rotation vector (`tvec`/`rvec`), not Euler angles: this
+  is what `cv2.solvePnP`, ArUco pose estimation, and FoundationPose all
+  return directly, so a perception pipeline can push its output here with
+  zero conversion, and it's free of gimbal lock (there's no Euler axis order
+  that avoids all degenerate orientations; a rotation vector has no such
+  case). `Pose6D` originally stored Euler angles (`x, y, z, pitch, yaw,
+  roll`) as a placeholder from before this had a real producer in mind —
+  migrated to `tvec`/`rvec` once that placeholder needed to accept real
+  perception-pipeline output, including rebuilding and re-verifying
+  everything that already depended on the old layout (see NOTES.md).
+- `/agrios_joint_telemetry` (`JointState6`) — motor control → monitoring/
+  perception, the opposite direction. Six joint angles (radians) + a
+  timestamp. There's no real hardware behind this yet, so
+  `motor_control_rt_loop.cpp` publishes a clearly-synthetic waveform each
+  iteration — what's real is the non-blocking `push()` pattern being
+  exercised, not the numbers.
+
+## LangGraph integration (`../spatial_tools.py`)
+
+Two tools wire the Agrios agent itself to both channels, kept in their own
+module rather than alongside the fixture/SQLAlchemy tools in `main.py`
+because this module's dependency footprint (POSIX shared memory via
+`ctypes`, a sibling C++ build) is fundamentally different from the rest of
+the agent:
+
+- **`submit_spatial_intent`** — a `SubmitSpatialIntent` Pydantic model
+  (`tvec`, `rvec`, each a fixed 3-tuple of floats) as the tool's
+  `args_schema`, pushing the validated pose onto the pose channel. Its
+  return value distinguishes "delivered to the ring buffer" from "no
+  motor-control process is attached to receive it" — `push()` succeeding
+  only means there was room in the buffer, not that anything is reading it.
+- **`read_joint_states`** — no arguments; reads the freshest joint-telemetry
+  sample via `JointStateBridge.read_latest()`, which drains the ring buffer
+  to the newest entry rather than returning whatever's oldest (right for
+  "what's the current state," wrong for the pose channel where every pose
+  matters) — still non-blocking, since each individual `pop()` inside that
+  drain is itself wait-free.
+
+Both fail gracefully rather than crashing the agent when the C++ side isn't
+available: `libagrios_bridge.so` not being built, or no motor-control
+process having created the shared-memory segment yet, both come back as a
+plain string result the LLM can read, not an exception. This matters
+concretely on this project's own Windows dev machine, where the bridge
+can't exist at all (POSIX shared memory), and the two tools need to degrade
+to "not available right now" instead of taking the whole agent down at
+import time — verified directly: `uv run python -c "import main"` and
+invoking both tools succeed on Windows with no C++ side present, returning
+a clear unavailability message.
+
+**The full loop was verified for real**, inside the Linux container, not
+just each half in isolation: installed `pydantic`+`langchain-core`, started
+a real `motor_control_rt_loop` process, then from a separate Python process
+imported the actual `spatial_tools` module and called the actual
+`@tool`-decorated functions (not a mock, not a unit test double) —
+`submit_spatial_intent.invoke({"tvec": [0.15, -0.2, 0.4], "rvec": [0.0, 0.0,
+0.785]})` reported delivery, and the RT loop's own telemetry log confirmed
+it: `pose=no` on every line until the exact iteration the push landed, then
+`pose=yes` from there on. `read_joint_states.invoke({})` then read back a
+live sample from that same RT loop's synthetic telemetry. Every stage of
+the requested architecture — Pydantic validation → LangGraph tool →
+compiled C ABI → real-time thread, and back — was exercised end to end in
+one run, not asserted from reading the code.
+
 ## Building and running the demos
 
 ```bash
@@ -202,4 +277,23 @@ The real-time loop, in place of the simple consumer above (needs
 
 ```bash
 ./cpp/build/motor_control_rt_loop --core 0 --priority 99 --iterations 2000
+```
+
+Reading the RT loop's joint-telemetry channel from Python, in place of/
+alongside the pose demo above:
+
+```bash
+python cpp/python/joint_state_reader_demo.py --count 10
+```
+
+Or exercise the actual LangGraph tools directly (needs `pydantic` and
+`langchain-core`, and `libagrios_bridge.so` discoverable — see
+`AGRIOS_BRIDGE_LIB` in `shared_ring_buffer.py` if it's not in one of the
+default build-output locations):
+
+```python
+from spatial_tools import submit_spatial_intent, read_joint_states
+
+submit_spatial_intent.invoke({"tvec": [0.15, -0.2, 0.4], "rvec": [0.0, 0.0, 0.785]})
+read_joint_states.invoke({})
 ```

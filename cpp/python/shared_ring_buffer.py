@@ -11,6 +11,10 @@ target like the ARM64 Jetson/Raspberry Pi boards this bridge is meant to run
 motor control on eventually. Routing through the compiled shim means there
 is exactly one implementation of the protocol, used by both languages.
 
+Two independent channels, matching bridge_c_api.h:
+    PoseBridge        perception -> motor control (target poses)
+    JointStateBridge  motor control -> monitoring/perception (joint telemetry)
+
 Requires libagrios_bridge.so to be built first (see cpp/CMakeLists.txt) and
 discoverable via the AGRIOS_BRIDGE_LIB env var or one of the default build-
 output locations this module checks.
@@ -33,15 +37,15 @@ _DEFAULT_SEARCH_PATHS = [
 ]
 
 DEFAULT_SHM_NAME = "/agrios_pose_bridge"
+DEFAULT_JOINT_SHM_NAME = "/agrios_joint_telemetry"
+
+
+# ---- Pose bridge: perception -> motor control ----
 
 
 class Pose6D(NamedTuple):
-    x: float
-    y: float
-    z: float
-    pitch: float
-    yaw: float
-    roll: float
+    tvec: tuple[float, float, float]  # translation vector [tx, ty, tz], meters
+    rvec: tuple[float, float, float]  # Rodrigues rotation vector [rx, ry, rz], radians
     timestamp_ns: int
 
 
@@ -49,12 +53,24 @@ class _CPose6D(ctypes.Structure):
     # Field order and types must match AgriosPose6D in bridge_c_api.h exactly
     # -- this is a raw memory-layout mirror, not a convenience wrapper.
     _fields_ = [
-        ("x", ctypes.c_double),
-        ("y", ctypes.c_double),
-        ("z", ctypes.c_double),
-        ("pitch", ctypes.c_double),
-        ("yaw", ctypes.c_double),
-        ("roll", ctypes.c_double),
+        ("tvec", ctypes.c_double * 3),
+        ("rvec", ctypes.c_double * 3),
+        ("timestamp_ns", ctypes.c_int64),
+    ]
+
+
+# ---- Joint telemetry: motor control -> monitoring/perception ----
+
+
+class JointState6(NamedTuple):
+    joint_angles_rad: tuple[float, float, float, float, float, float]
+    timestamp_ns: int
+
+
+class _CJointState6(ctypes.Structure):
+    # Field order and types must match AgriosJointState6 in bridge_c_api.h.
+    _fields_ = [
+        ("joint_angles_rad", ctypes.c_double * 6),
         ("timestamp_ns", ctypes.c_int64),
     ]
 
@@ -77,15 +93,25 @@ _lib = None  # lazily loaded so importing this module doesn't require the .so to
 def _lib_handle() -> ctypes.CDLL:
     global _lib
     if _lib is None:
-        _lib = _load_library()
-        _lib.agrios_bridge_open.argtypes = [ctypes.c_char_p, ctypes.c_int]
-        _lib.agrios_bridge_open.restype = ctypes.c_void_p
-        _lib.agrios_bridge_close.argtypes = [ctypes.c_void_p]
-        _lib.agrios_bridge_close.restype = None
-        _lib.agrios_bridge_push.argtypes = [ctypes.c_void_p, ctypes.POINTER(_CPose6D)]
-        _lib.agrios_bridge_push.restype = ctypes.c_int
-        _lib.agrios_bridge_pop.argtypes = [ctypes.c_void_p, ctypes.POINTER(_CPose6D)]
-        _lib.agrios_bridge_pop.restype = ctypes.c_int
+        lib = _load_library()
+        lib.agrios_bridge_open.argtypes = [ctypes.c_char_p, ctypes.c_int]
+        lib.agrios_bridge_open.restype = ctypes.c_void_p
+        lib.agrios_bridge_close.argtypes = [ctypes.c_void_p]
+        lib.agrios_bridge_close.restype = None
+        lib.agrios_bridge_push.argtypes = [ctypes.c_void_p, ctypes.POINTER(_CPose6D)]
+        lib.agrios_bridge_push.restype = ctypes.c_int
+        lib.agrios_bridge_pop.argtypes = [ctypes.c_void_p, ctypes.POINTER(_CPose6D)]
+        lib.agrios_bridge_pop.restype = ctypes.c_int
+
+        lib.agrios_joint_bridge_open.argtypes = [ctypes.c_char_p, ctypes.c_int]
+        lib.agrios_joint_bridge_open.restype = ctypes.c_void_p
+        lib.agrios_joint_bridge_close.argtypes = [ctypes.c_void_p]
+        lib.agrios_joint_bridge_close.restype = None
+        lib.agrios_joint_bridge_push.argtypes = [ctypes.c_void_p, ctypes.POINTER(_CJointState6)]
+        lib.agrios_joint_bridge_push.restype = ctypes.c_int
+        lib.agrios_joint_bridge_pop.argtypes = [ctypes.c_void_p, ctypes.POINTER(_CJointState6)]
+        lib.agrios_joint_bridge_pop.restype = ctypes.c_int
+        _lib = lib
     return _lib
 
 
@@ -94,7 +120,7 @@ class PoseBridge:
 
     Usage:
         with PoseBridge(owner=True) as bridge:   # e.g. the C++ consumer's counterpart
-            bridge.push(Pose6D(x=1.0, y=2.0, z=0.0, pitch=0, yaw=0, roll=0,
+            bridge.push(Pose6D(tvec=(1.0, 2.0, 0.0), rvec=(0.0, 0.0, 0.0),
                                 timestamp_ns=time.monotonic_ns()))
 
     `owner=True` creates/resets the segment -- call this from exactly one
@@ -121,7 +147,8 @@ class PoseBridge:
 
     def push(self, pose: Pose6D) -> bool:
         """Returns False if the ring buffer is full (never blocks)."""
-        c_pose = _CPose6D(*pose)
+        c_pose = _CPose6D((ctypes.c_double * 3)(*pose.tvec), (ctypes.c_double * 3)(*pose.rvec),
+                           pose.timestamp_ns)
         return bool(self._lib.agrios_bridge_push(self._handle, ctypes.byref(c_pose)))
 
     def pop(self) -> Optional[Pose6D]:
@@ -129,6 +156,59 @@ class PoseBridge:
         c_pose = _CPose6D()
         if not self._lib.agrios_bridge_pop(self._handle, ctypes.byref(c_pose)):
             return None
-        return Pose6D(
-            c_pose.x, c_pose.y, c_pose.z, c_pose.pitch, c_pose.yaw, c_pose.roll, c_pose.timestamp_ns
-        )
+        return Pose6D(tuple(c_pose.tvec), tuple(c_pose.rvec), c_pose.timestamp_ns)
+
+
+class JointStateBridge:
+    """Attaches to (or creates) the shared-memory joint-telemetry ring buffer.
+
+    In the normal topology the motor-control RT loop is the owner (it's the
+    producer); readers attach with owner=False (the default).
+    """
+
+    def __init__(self, name: str = DEFAULT_JOINT_SHM_NAME, owner: bool = False):
+        self._lib = _lib_handle()
+        self._handle: Optional[int] = self._lib.agrios_joint_bridge_open(name.encode("utf-8"), int(owner))
+        if not self._handle:
+            raise RuntimeError(f"agrios_joint_bridge_open({name!r}, owner={owner}) failed -- see stderr")
+
+    def close(self) -> None:
+        if self._handle:
+            self._lib.agrios_joint_bridge_close(self._handle)
+            self._handle = None
+
+    def __enter__(self) -> "JointStateBridge":
+        return self
+
+    def __exit__(self, *_exc_info) -> None:
+        self.close()
+
+    def push(self, state: JointState6) -> bool:
+        """Returns False if the ring buffer is full (never blocks)."""
+        c_state = _CJointState6((ctypes.c_double * 6)(*state.joint_angles_rad), state.timestamp_ns)
+        return bool(self._lib.agrios_joint_bridge_push(self._handle, ctypes.byref(c_state)))
+
+    def pop(self) -> Optional[JointState6]:
+        """Returns None if the ring buffer is empty (never blocks)."""
+        c_state = _CJointState6()
+        if not self._lib.agrios_joint_bridge_pop(self._handle, ctypes.byref(c_state)):
+            return None
+        return JointState6(tuple(c_state.joint_angles_rad), c_state.timestamp_ns)
+
+    def read_latest(self) -> Optional[JointState6]:
+        """Drains the ring buffer and returns only the freshest sample.
+
+        This is a FIFO ring buffer, so a single pop() returns the oldest
+        unread sample, not the newest -- fine for the pose bridge (every
+        pose matters), wrong for "what's the current joint state" (only the
+        newest reading matters; older ones are just backlog). Draining is
+        still non-blocking and never stalls the writer: each pop() is
+        wait-free and this loop only ever does as many of them as are
+        already queued, terminating the moment pop() reports empty.
+        """
+        latest: Optional[JointState6] = None
+        while True:
+            sample = self.pop()
+            if sample is None:
+                return latest
+            latest = sample

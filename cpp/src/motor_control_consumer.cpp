@@ -56,8 +56,8 @@ int main(int argc, char** argv) {
 
         ++consumed;
         std::cout << "[motor_control] target pose #" << consumed << ": "
-                  << "x=" << pose.x << " y=" << pose.y << " z=" << pose.z
-                  << " pitch=" << pose.pitch << " yaw=" << pose.yaw << " roll=" << pose.roll
+                  << "tvec=(" << pose.tvec[0] << ", " << pose.tvec[1] << ", " << pose.tvec[2] << ")"
+                  << " rvec=(" << pose.rvec[0] << ", " << pose.rvec[1] << ", " << pose.rvec[2] << ")"
                   << " t=" << pose.timestamp_ns << "ns\n";
     }
 

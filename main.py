@@ -18,6 +18,8 @@ from sqlalchemy.exc import SQLAlchemyError
 import logging
 from pathlib import Path
 
+from spatial_tools import submit_spatial_intent, read_joint_states
+
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -142,7 +144,8 @@ def get_pending_tasks() -> str:
 model = ChatOllama(model="qwen2.5:7b")
 config = {"configurable": {"thread_id": "1"}}
 langfuse_handler = CallbackHandler()
-tools = [get_weather_forecast, lookup_crop_calendar, query_field_status, log_task, get_pending_tasks]
+tools = [get_weather_forecast, lookup_crop_calendar, query_field_status, log_task, get_pending_tasks,
+         submit_spatial_intent, read_joint_states]
 model_with_tools = model.bind_tools(tools)
 tools_by_name = {t.name: t for t in tools}
 graph = StateGraph(AgentState)
