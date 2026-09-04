@@ -6,7 +6,9 @@
 //   count   stop after consuming this many poses (default: run until a
 //           sentinel pose with timestamp_ns < 0 arrives, or Ctrl+C)
 
+#include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <iostream>
 #include <optional>
@@ -24,6 +26,18 @@ namespace {
 // instead of polling at all.
 constexpr auto kPollInterval = std::chrono::microseconds(500);
 
+// This process is the OWNER of /agrios_pose_bridge -- it's the one that
+// created the segment and is responsible for shm_unlink-ing it. Without a
+// signal handler, SIGINT (Ctrl-C) or SIGTERM (`kill`, or what any real
+// process supervisor sends on shutdown) hits the default disposition:
+// immediate termination, no destructors, agrios_bridge_close() never runs,
+// the segment is orphaned in /dev/shm. This flag exists so the main loop can
+// exit on its own terms and reach that cleanup instead.
+std::atomic<bool> g_running{true};
+static_assert(std::atomic<bool>::is_always_lock_free,
+              "g_running must be lock-free to be touched from a signal handler");
+void handle_shutdown_signal(int) { g_running.store(false, std::memory_order_relaxed); }
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -31,6 +45,9 @@ int main(int argc, char** argv) {
     if (argc > 1) {
         count = std::strtol(argv[1], nullptr, 10);
     }
+
+    std::signal(SIGINT, handle_shutdown_signal);
+    std::signal(SIGTERM, handle_shutdown_signal);
 
     AgriosBridgeHandle* handle = agrios_bridge_open(agrios::kDefaultShmName, /*is_owner=*/1);
     if (handle == nullptr) {
@@ -43,7 +60,7 @@ int main(int argc, char** argv) {
 
     long consumed = 0;
     AgriosPose6D pose{};
-    while (!count.has_value() || consumed < *count) {
+    while (g_running.load(std::memory_order_relaxed) && (!count.has_value() || consumed < *count)) {
         if (!agrios_bridge_pop(handle, &pose)) {
             std::this_thread::sleep_for(kPollInterval);
             continue;

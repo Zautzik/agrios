@@ -80,7 +80,17 @@ using TelemetryRing = agrios::SPSCRingBuffer<TelemetrySample, 256>;
 std::atomic<bool> g_running{true};
 std::atomic<bool> g_rt_thread_failed{false};
 
-void handle_sigint(int) { g_running.store(false, std::memory_order_relaxed); }
+// SIGINT and SIGTERM both need to route through here, not just SIGINT --
+// SIGTERM is what `kill` sends by default, and what every real process
+// supervisor (systemd, Docker, k8s) sends on shutdown before escalating to
+// SIGKILL. Handling only SIGINT means every non-interactive shutdown path
+// bypasses cleanup and orphans this process's two owned shared-memory
+// segments. std::atomic<bool>::store with a lock-free atomic is one of the
+// few operations the C++ standard actually permits inside a signal handler
+// ([support.signal]) -- nothing else happens here on purpose.
+static_assert(std::atomic<bool>::is_always_lock_free,
+              "g_running must be lock-free to be touched from a signal handler");
+void handle_shutdown_signal(int) { g_running.store(false, std::memory_order_relaxed); }
 
 void add_ns(timespec& t, std::int64_t ns) {
     constexpr std::int64_t kNsPerSec = 1'000'000'000;
@@ -250,7 +260,8 @@ int main(int argc, char** argv) {
         }
     }
 
-    std::signal(SIGINT, handle_sigint);
+    std::signal(SIGINT, handle_shutdown_signal);
+    std::signal(SIGTERM, handle_shutdown_signal);
 
     AgriosBridgeHandle* bridge = agrios_bridge_open(agrios::kDefaultShmName, /*is_owner=*/1);
     if (bridge == nullptr) {
