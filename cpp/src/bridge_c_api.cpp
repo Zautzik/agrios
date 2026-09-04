@@ -1,5 +1,6 @@
 #include "agrios/bridge_c_api.h"
 
+#include <cstddef>  // offsetof
 #include <cstring>
 #include <exception>
 #include <iostream>
@@ -14,11 +15,24 @@ namespace {
 using PoseBridge = agrios::SharedRingBuffer<agrios::Pose6D, agrios::kBridgeCapacity>;
 using JointBridge = agrios::SharedRingBuffer<agrios::JointState6, agrios::kJointTelemetryCapacity>;
 
-static_assert(sizeof(AgriosPose6D) == sizeof(agrios::Pose6D),
+// Per-field offset checks, not just sizeof: two structs can have identical
+// total size while their fields have silently diverged in order -- a
+// sizeof-only check would not catch that, and it's exactly the kind of
+// change that's easy to make on one side of this file and forget on the
+// other, since the two struct definitions live in different headers
+// (bridge_c_api.h vs pose6d.hpp / joint_state.hpp).
+static_assert(sizeof(AgriosPose6D) == sizeof(agrios::Pose6D) &&
+                  offsetof(AgriosPose6D, tvec) == offsetof(agrios::Pose6D, tvec) &&
+                  offsetof(AgriosPose6D, rvec) == offsetof(agrios::Pose6D, rvec) &&
+                  offsetof(AgriosPose6D, timestamp_ns) == offsetof(agrios::Pose6D, timestamp_ns),
               "AgriosPose6D (C ABI) and agrios::Pose6D (C++ implementation) "
               "have drifted apart -- keep their fields identical in order "
               "and type");
-static_assert(sizeof(AgriosJointState6) == sizeof(agrios::JointState6),
+static_assert(sizeof(AgriosJointState6) == sizeof(agrios::JointState6) &&
+                  offsetof(AgriosJointState6, joint_angles_rad) ==
+                      offsetof(agrios::JointState6, joint_angles_rad) &&
+                  offsetof(AgriosJointState6, timestamp_ns) ==
+                      offsetof(agrios::JointState6, timestamp_ns),
               "AgriosJointState6 (C ABI) and agrios::JointState6 (C++ "
               "implementation) have drifted apart -- keep their fields "
               "identical in order and type");

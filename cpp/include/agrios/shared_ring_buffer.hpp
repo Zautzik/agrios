@@ -16,6 +16,17 @@
 
 namespace agrios {
 
+#if defined(__linux__)
+inline constexpr int kMapPopulateFlag = MAP_POPULATE;
+#else
+// MAP_POPULATE is Linux-specific; there is no portable equivalent (macOS
+// has no analogous mmap flag). The explicit touch pass below is what
+// actually guarantees pre-faulting on non-Linux targets -- MAP_POPULATE
+// here is a kernel hint that reduces the *number* of faults during mmap()
+// itself where it's available, not the sole mechanism this relies on.
+inline constexpr int kMapPopulateFlag = 0;
+#endif
+
 // Owns (or attaches to) a POSIX shared-memory segment holding exactly one
 // SPSCRingBuffer<T, Capacity>, and placement-constructs it there.
 //
@@ -51,15 +62,47 @@ class SharedRingBuffer {
             throw std::runtime_error(msg);
         }
 
-        void* addr = ::mmap(nullptr, sizeof(Buffer), PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
+        void* addr =
+            ::mmap(nullptr, sizeof(Buffer), PROT_READ | PROT_WRITE, MAP_SHARED | kMapPopulateFlag, fd_, 0);
         if (addr == MAP_FAILED) {
             const std::string msg = "mmap failed: " + std::string(std::strerror(errno));
             ::close(fd_);
             throw std::runtime_error(msg);
         }
 
-        buffer_ = owner_ ? new (addr) Buffer()                    // zero-initializes head_/tail_
-                          : reinterpret_cast<Buffer*>(addr);       // reuse the live object as-is
+        // MAP_POPULATE (where available) is a kernel hint, not a guarantee --
+        // it can still defer pages under memory pressure, and has no
+        // portable equivalent on non-Linux targets. Belt and suspenders:
+        // explicitly fault in every page of the mapping ourselves, so the
+        // *first* push()/pop() an RT thread performs never pays a first-
+        // touch minor-fault cost -- the same reasoning as prefault_stack()
+        // in rt_thread.hpp, applied to the shared-memory side of the bridge.
+        //
+        // Owner: safe to write-touch (zero) the whole region -- there's no
+        // live state yet, we're about to placement-construct into it anyway.
+        // Non-owner: must NOT write -- doing so would corrupt whatever the
+        // owner has already published (head_/tail_, or in-flight payload
+        // data). A physical page already being resident (because the owner
+        // faulted it in) does not exempt this process from faulting it into
+        // *its own* page tables on first touch, so this still needs a
+        // read-only pass, not a no-op.
+        if (owner_) {
+            std::memset(addr, 0, sizeof(Buffer));
+            buffer_ = new (addr) Buffer();  // zero-initializes head_/tail_ (redundant with the memset
+                                             // above for those two members, not for the payload array)
+        } else {
+            volatile const unsigned char* p = static_cast<const unsigned char*>(addr);
+            unsigned char sink = 0;
+            // Smaller-than-actual-page stride is always safe (just touches
+            // some pages more than once); sysconf(_SC_PAGESIZE) would be
+            // more precise but isn't worth the extra syscall for a one-time
+            // startup cost.
+            for (std::size_t i = 0; i < sizeof(Buffer); i += 4096) {
+                sink ^= p[i];
+            }
+            (void)sink;
+            buffer_ = reinterpret_cast<Buffer*>(addr);  // reuse the live object as-is
+        }
     }
 
     ~SharedRingBuffer() {
