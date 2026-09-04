@@ -1,31 +1,45 @@
 # Agrios — Masterclass & Study Guide
 > A from-first-principles study guide to everything living in this repo: a ~170-line LangGraph
-> agent that turned out to contain a full syllabus — explicit state machines, functional state
-> reducers, durable checkpointing, tool-calling as structured generation, bounded recursion,
-> failure-boundary discipline, connection pooling, observability, and hermetic testing of a
-> non-deterministic system. Small codebase, complete concepts. Every idea below is traceable
-> to a specific line in `main.py`, `test_agent.py`, or a specific commit — nothing here is
-> invented, and nowhere does this document claim a measured result the project doesn't
-> actually have. The eval suite has since been run for real: 28/30 on reconciliation, one
-> confirmed reproducible gap, one open question — see war story #7 in Part 3.
+> agent that turned out to contain a full syllabus, plus a second, entirely separate subsystem
+> that grew alongside it — a C++20 lock-free ring buffer over POSIX shared memory, hardened to
+> PREEMPT_RT/ROS 2 real-time discipline, bridging that same agent to a 1 kHz motor-control
+> thread. Two languages, two memory models, two failure domains, one repo. Explicit state
+> machines, functional state reducers, durable checkpointing, tool-calling as structured
+> generation, bounded recursion, failure-boundary discipline, connection pooling, observability,
+> hermetic testing of a non-deterministic system — and, on the systems side, lock-free
+> concurrency with formally correct memory ordering, cache-line-aware data layout, real-time
+> thread scheduling, POSIX IPC lifecycle management, cross-language ABI design, and
+> async-signal-safe process teardown. Every idea below is traceable to a specific line in
+> `main.py`, `test_agent.py`, `cpp/`, `spatial_tools.py`, or a specific commit — nothing here is
+> invented, and nowhere does this document claim a measured result the project doesn't actually
+> have. The eval suite has been run for real: 28/30 on reconciliation, one confirmed reproducible
+> gap, one open question — see war story #7 in Part 3. The bridge has been verified for real
+> too, including two rounds of adversarial audit that each found genuine bugs and each correctly
+> refused at least one demanded "fix" that would have been a regression — see war stories #13
+> and #14, and Part 11 in full.
 >
 > Companion to [NOTES.md](../NOTES.md) (the build log, in the moment) and [README.md](../README.md)
 > (the reference). This document is the third angle: not what happened or what it does, but
 > *why the ideas underneath it work*, explained as if teaching them to someone who's never
-> seen an agent framework before.
+> seen an agent framework — or a lock-free queue — before.
 ---
 ## Part 0 — The one-sentence summary
 > *"Agrios is a LangGraph ReAct-style agent for farm operations, running entirely on a local
-> Ollama model: five tools, a hand-written state graph instead of a black-box `.run()` call,
+> Ollama model: seven tools, a hand-written state graph instead of a black-box `.run()` call,
 > SQL-backed persistence that survives a restart, full tracing, and exception handling scoped
 > to exactly the failures I've confirmed can happen — including two I only found by running the
-> thing and reading a library's source code."*
-The project is deliberately small. That's not a limitation to apologize for — it's what makes
-every concept in it inspectable in full, instead of buried under abstraction layers you have to
-take on faith. A production agent framework hides the graph, the reducer, the checkpoint
-format, and the tool-calling wire protocol behind convenience functions. This project wrote
-all of them out by hand, once, on purpose, specifically so each one could be understood rather
-than assumed.
+> thing and reading a library's source code. Two of those seven tools cross into a second
+> system entirely: a lock-free C++20 ring buffer over POSIX shared memory, hardened to
+> PREEMPT_RT/ROS 2 discipline, that the Python agent talks to but never runs inside of."*
+The project is deliberately small on the Python side, and deliberately narrow (one data
+structure, reused twice, plus the scaffolding to run it safely) on the C++ side. Neither is a
+limitation to apologize for — it's what makes every concept in both halves inspectable in full,
+instead of buried under abstraction layers you have to take on faith. A production agent
+framework hides the graph, the reducer, the checkpoint format, and the tool-calling wire
+protocol behind convenience functions; a production robotics IPC layer usually hides the same
+way, behind a message-passing library (ROS 2's DDS, ZeroMQ, gRPC) whose lock-free internals you
+never read. This project wrote all of it out by hand, once, on purpose, specifically so each
+piece could be understood rather than assumed.
 ---
 ## Part 1 — Skills inventory
 Depth is marked honestly: **solid** (could explain and defend it under direct questioning) ·
@@ -47,7 +61,17 @@ Depth is marked honestly: **solid** (could explain and defend it under direct qu
 | **Local LLM inference** | Run tool-calling inference entirely offline via Ollama; understand the real RAM ceiling this imposes, having hit it | solid |
 | **Testing a non-deterministic system** | Design a parametrized eval suite across failure-mode categories, keep it hermetic against a system whose whole point is persistent shared state, and gate a slow/live suite behind a marker | solid |
 | **Python craft in service of the above** | `TypedDict` + `Annotated` for typed, reducer-aware state; decorators (`@tool`); context managers (`with engine.connect()`, `with SqliteSaver.from_conn_string(...)`); dict-merge semantics; f-strings; `if __name__ == "__main__"` | solid |
-| **Git workflow** | Five commits, each a coherent unit of work with a rationale in the message — not "fix stuff" | solid |
+| **Git workflow** | Coherent, single-purpose commits, each with a rationale in the message — not "fix stuff" | solid |
+| **Lock-free concurrent data structures** | Design and implement a single-producer/single-consumer ring buffer from scratch — index math via bitwise AND on a power-of-two capacity, the full-vs-empty ambiguity resolved by always keeping one slot unused rather than a separate counter | solid |
+| **C++ memory-order semantics** | Choose `relaxed`/`acquire`/`release` per operation, not `seq_cst` by default — explain exactly which store-load pair synchronizes-with which, and why a plain (non-atomic) payload write is safely ordered by the atomic release/acquire around it, not by being atomic itself | solid |
+| **Cache-line-aware data layout** | Diagnose false sharing as a *correctness-adjacent performance* bug (not a crash, a stall) and fix it with `alignas(64)` on independently-written fields; verify the resulting layout at compile time instead of trusting it | solid |
+| **POSIX shared memory / cross-process IPC** | `shm_open`/`mmap`/`ftruncate`/`munmap`/`shm_unlink` end to end — owner-vs-attacher lifecycle, stale-segment cleanup, and the distinction between a mapping (per-process, kernel-reclaimed automatically) and a named object (persists until explicitly unlinked) | solid |
+| **Real-time thread scheduling (PREEMPT_RT/ROS 2 style)** | `mlockall` + explicit stack pre-fault, `SCHED_FIFO` priority selection (and its kernel-thread-starvation risk at 99), CPU affinity vs. true core isolation, absolute-deadline `clock_nanosleep` scheduling vs. relative-sleep drift | solid |
+| **Cross-language ABI design** | Build a compiled C boundary between Python and C++ instead of letting `ctypes` reimplement synchronization logic; verify layout compatibility with per-field `offsetof`, not just `sizeof` | solid |
+| **Signal handling & process lifecycle** | Distinguish `SIGINT` from `SIGTERM` and know why a real supervisor sends the latter; know exactly what a signal handler is allowed to touch (`std::atomic`, checked via `is_always_lock_free`) and why almost everything else in the standard library isn't | solid |
+| **Concurrency correctness verification** | Design a stress test that forces the failure mode it's checking for (a small buffer, forced wraparound, millions of operations) rather than hoping a single pass proves anything; caught my own test silently checking nothing under `NDEBUG` before trusting a green result again | solid |
+| **Compile-time layout verification (C++ templates)** | Use `static_assert(offsetof(...))` to make an ABI assumption fail the build instead of failing silently in production; diagnose and fix an "incomplete type" error by understanding what a "complete-class context" actually is | solid |
+| **Cross-platform build systems** | `CMake` targets with per-target compiler/linker flags (`-Wl,-z,now`), a platform guard that refuses to configure on the wrong OS on purpose, and containerized (Docker) verification for POSIX code on a Windows dev machine | solid |
 ### 1B. Cognitive habits
 These outlast this specific stack. Anyone can pick up `SqliteSaver` in an afternoon; these are harder to learn.
 | Habit | The move | Where I did it |
@@ -60,6 +84,10 @@ These outlast this specific stack. Anyone can pick up `SqliteSaver` in an aftern
 | **Test hermetically, not against shared state** | Recognized that the app's own persistence (`SqliteSaver` + fixed `thread_id`) would make eval cases leak into each other if reused as-is | `MemorySaver` + a fresh `uuid4()` thread per test case |
 | **Name the environment as a bug source, not just the code** | An OOM crash and a CWD-relative path bug were both "correct code, wrong assumption about what's running underneath it" | The Docker/WSL memory-pressure incident; the subdirectory-launch path bug |
 | **Predict-then-verify** | State a plausible explanation for a failure, then test it directly instead of writing it down as fact | The cold-start theory for the weather-forecast miss — killed by rerunning the case alone twice more instead of trusting the first guess |
+| **Decline a wrong instruction, with reasoning, not silent compliance** | Two separate audits demanded specific "fixes"; two of the four demanded changes were based on incorrect premises about the code and would have been regressions | Refused `#pragma pack(1)` (would risk unaligned access, there's no padding to remove) and a busy-spin conversion (would burn *more* power at 1 kHz, not less) — explained why in both cases instead of complying because the request was phrased forcefully |
+| **Distinguish "looks alarming" from "is actually a bug"** | An audit's framing assumed the Python side should call `shm_unlink` on shutdown | It shouldn't and doesn't — it's a non-owner by design, and "fixing" that would delete a segment a still-running producer depends on; verified the *actual* concern (missing `munmap`) was already covered by kernel-guaranteed cleanup, not left unexamined |
+| **Report a measurement that contradicts the hypothesis, don't reframe it** | A before/after page-fault comparison came back showing *more* faults in the patched version, not fewer | Wrote down the number as measured, then explained precisely why it was still consistent with the fix working (the test never reached the code path the fix targets) — instead of quietly picking a different metric that told a cleaner story |
+| **An ephemeral test environment can hide a real bug indefinitely** | Two real signal-handling bugs (one binary with zero handling, one missing `SIGTERM` specifically) were live through dozens of verification runs and never surfaced | Every run used `docker run --rm`, which destroys `/dev/shm` on exit regardless of whether cleanup code ran — a graceful exit and an orphaned segment looked identical from outside the container every single time |
 ---
 ## Part 2 — Where the project stands
 Every phase below is one real commit — this is the actual build order, not a retrofit narrative.
@@ -70,11 +98,22 @@ Every phase below is one real commit — this is the actual build order, not a r
 | 2 — The real graph | `2b255e1` | Hand-rolled `StateGraph` (`agent`/`tools` nodes, conditional edge, `Annotated[list, add_messages]`), grew to 5 tools, `SqliteSaver` for durable persistence, `try/except` on every tool (later found to be over-applied), structured logging, Langfuse `CallbackHandler` | Control flow becomes an inspectable graph instead of a framework's hidden loop |
 | 3 — Hardening pass 1 | `fa4350b` | Explicit `recursion_limit=10` + `GraphRecursionError` handling, deleted the dead `try/except` on 2 static tools, moved the 3 DB tools onto a pooled SQLAlchemy `engine`, caught `ollama.ResponseError`/`ConnectionError` after a real out-of-memory crash | Exception handling narrows to real boundaries instead of blanket coverage |
 | 4 — Hardening pass 2 + eval | `1edd0c8` | 30-case parametrized `pytest` eval suite (`test_agent.py`) with hermetic `MemorySaver` + `uuid4` runs behind a `slow` marker; fixed `httpx.ConnectError` bypassing the existing except tuple on the streaming code path; anchored both DB paths to `Path(__file__).parent`; removed an unused leftover import | Verification becomes repeatable instead of manual, and a real transport-layer bug gets found and fixed |
-**Current state, stated plainly:** a single-file (~173-line) CLI agent, five tools (three DB-backed,
-two fixture data), one hardcoded `thread_id`, local-only inference, traced through a self-hosted
-Langfuse stack, and checked by a 30-case suite that's now actually been run and scored: 28/30
-correct on reconciliation, one confirmed reproducible tool-selection gap, one open question still
-under-sampled — see war story #7 in Part 3 and Part 4 for the honest breakdown.
+| 5 — Eval run + docs | `70d5de8` | Ran the 30-case suite live against `qwen2.5:7b`, fixed one test-bug (potato/potatoes exact match), reconciled to 28/30 | A passing/failing test result is a claim, not a fact, until you've read *why* |
+| 6 — The bridge, part one | `1b4522d` | `cpp/`: `SPSCRingBuffer<T,Capacity>` (lock-free, `alignas(64)`, acquire/release), `SharedRingBuffer` (POSIX `shm_open`/`mmap` wrapper), a compiled C ABI (`bridge_c_api.cpp`) instead of raw Python `ctypes` struct-poking, a 5M-item concurrency stress test | Lock-free concurrent data structures and cross-process, cross-language IPC enter the codebase for the first time |
+| 7 — The real-time loop | `b425d12` | `motor_control_rt_loop.cpp` + `rt_thread.hpp`: `mlockall` + stack pre-fault, `SCHED_FIFO` 99, CPU affinity, absolute-deadline `clock_nanosleep` scheduling, zero-allocation hot loop with telemetry exported through a second lock-free channel | PREEMPT_RT/ROS 2 real-time thread discipline, verified both when it succeeds and when it correctly refuses to run |
+| 8 — LangGraph ↔ bridge integration | `863e5fd` | `spatial_tools.py`: `SubmitSpatialIntent` (Pydantic `args_schema`), `read_joint_states`; migrated `Pose6D` from placeholder Euler angles to `tvec`/`rvec` (a breaking ABI change, confirmed necessary before making it); added a second, independent shared-memory channel for joint telemetry | The Python agent and the C++ real-time loop become one system, verified end to end through a real `@tool` call into a real running RT process |
+| 9 — Two adversarial audits | `ac24fd0`, `96f5c6a` | Fixed a real `SIGTERM`-handling gap in both owner processes (bug #1: zero signal handling; bug #2: `SIGINT` only) that had been silently masked by every prior `docker run --rm` test; fixed a real `mmap()` prefault gap (`MAP_POPULATE` + explicit touch) and strengthened an ABI check from `sizeof`-only to per-field `offsetof`; correctly declined two other demanded "fixes" (`#pragma pack`, a busy-spin conversion) as regressions | Auditing your own system adversarially finds real bugs that verifying it optimistically doesn't — and refusing a wrong fix is as much the skill as finding a right one |
+**Current state, stated plainly:** two systems in one repo. The Python side: a single-file
+(~175-line) CLI agent, seven tools (three DB-backed, two fixture data, two crossing into the C++
+bridge), one hardcoded `thread_id`, local-only inference, traced through a self-hosted Langfuse
+stack, checked by a 30-case suite scored at 28/30 on reconciliation (not re-run since the tool
+count changed from five to seven — see Part 4). The C++ side: a lock-free SPSC ring buffer proven
+correct under a 5,000,000-operation concurrent stress test, two independent shared-memory
+channels, a real-time thread hardened to PREEMPT_RT/ROS 2 discipline and verified live against a
+real Python tool call — with an explicit, written-down account of exactly which parts of that
+verification depend on real PREEMPT_RT hardware to mean anything, and which don't. See war story
+#7 in Part 3, Part 4 for the honest roadmap, and Part 11 for the bridge's full technical
+walkthrough.
 ---
 ## Part 3 — War stories
 1. **The stale interpreter.** A `NameError` kept firing against code that, on inspection, no
@@ -148,6 +187,112 @@ under-sampled — see war story #7 in Part 3 and Part 4 for the honest breakdown
    only worth keeping if it survives being tested on purpose — the same discipline Agroteca's
    embedder experiment ran on itself, just applied here in about two minutes instead of seven
    hours.*
+8. **The layout check that didn't compile.** `spsc_ring_buffer.hpp` asserts at compile time that
+   `head_`, `tail_`, and the payload buffer land at the exact byte offsets the C ABI and the
+   Python `ctypes.Structure` both depend on —
+   `static_assert(offsetof(SPSCRingBuffer, head_) == 0)`, written directly in the class body.
+   First build: `invalid use of incomplete type`. `offsetof` needs a complete type, and a class
+   template isn't complete yet at the point in its own body where that assertion was written —
+   the closing `};` hasn't been reached. Fixed by moving the `offsetof` calls into small
+   `static constexpr` member *functions* — function bodies are a "complete-class context" even
+   when written inline, so `offsetof` works there — then calling those functions from
+   `static_assert`s placed after the class closes. *Lesson: a check that doesn't compile is a
+   check that was never actually run — this one failed loudly at build time instead of silently
+   passing nothing, which is the entire reason to write it as a `static_assert` instead of a
+   comment.*
+9. **The test that passed by checking nothing.** The concurrency stress test (a real producer
+   thread against a real consumer thread, 5,000,000 items through a deliberately small buffer)
+   was built on `assert()`. `cmake --build`'s default build type (`RelWithDebInfo`, like every
+   CMake Release-family type) defines `NDEBUG`, which compiles every `assert()` in the program
+   down to nothing. `ctest` reported "1/1 tests passed" — truthfully, about a test now checking
+   zero of its conditions. The tell wasn't in the test output, it was in the build log: a warning
+   about an unused variable that was only ever *read* inside `assert()` calls — once those
+   calls compile away, so does the only place that variable does anything. Fixed by replacing
+   every `assert()` with a small `CHECK()` macro carrying no `NDEBUG` guard at all, then verified
+   the fix two independent ways (an explicit `-DNDEBUG` build, and a fresh CMake build) rather
+   than trusting that adding the macro was self-evidently correct. *Lesson: the exact same shape
+   of bug as the potato/potatoes test assertion from war story #7 — a green result is a claim
+   about the test, not a fact about the code, until you've checked what the test was actually
+   capable of catching.*
+10. **A request that would have destroyed a working demo if honored too literally.** Asked to
+   "refactor the 1 kHz motor control loop" to add real-time hardening. But the existing
+   `motor_control_consumer.cpp` was never a 1 kHz loop — it's a poll-with-sleep-and-print demo
+   built specifically to verify the bridge itself, and PREEMPT_RT constraints (no `std::cout`,
+   no bounded exit, fixed-rate forever) would have broken that demo's actual job to satisfy a
+   request that was really describing something that didn't exist yet. Wrote the real-time loop
+   as its own new file instead, reusing the same bridge underneath, and said so explicitly rather
+   than silently picking one interpretation. *Lesson: honoring an instruction's literal wording
+   over its actual intent can be its own kind of failure to listen — the fix wasn't refusing the
+   ask or silently overriding it, it was naming the mismatch out loud and then doing the thing
+   that was actually being asked for.*
+11. **A breaking ABI change, confirmed before it was made, not after.** A new tool needed to
+   accept `tvec`/`rvec` (translation + Rodrigues rotation vector — what `cv2.solvePnP`/ArUco/
+   FoundationPose emit natively). The existing `Pose6D` struct stored Euler angles instead — a
+   placeholder chosen before any real producer existed to match, not a considered decision.
+   Converting `rvec` to Euler *inside the tool* would have buried a lossy, gimbal-lock-prone
+   transform behind what should have been a "write bytes to shared memory" function. The
+   alternative — migrating `Pose6D` itself — meant touching a struct whose exact byte offsets are
+   asserted at compile time and mirrored across three languages (C++, the C ABI, Python
+   `ctypes`), a change with real blast radius. Confirmed the direction was worth it *before*
+   writing the migration, then rebuilt and re-verified every single thing that depended on the
+   old layout, not just the parts that obviously needed touching. *Lesson: the size of a change
+   isn't a reason to avoid asking whether it's the right one — it's the reason to ask before,
+   not after, since the cost of guessing wrong scales with exactly how much the change touches.*
+12. **A shared-memory segment that vanished, and a first guess that was wrong.** The first attempt
+   at a full Python-to-C++ integration test failed: `shm_open("/agrios_pose_bridge") failed: No
+   such file or directory`, even though the C++ process creates that segment before doing
+   anything else. First instinct was a race — maybe the process just hadn't started yet. Checked
+   instead of assuming: `kill -0 $PID` said the process wasn't running at all —
+   `error while loading shared libraries: libagrios_bridge.so: cannot open shared object file`.
+   Every earlier verification pass had mounted just the `cpp/` subdirectory into a container at a
+   fixed path, so the binary's build-time RPATH (pointing at that exact absolute path) resolved
+   correctly. This pass mounted the *whole repository* instead, to reach a Python file living
+   outside `cpp/` — same binary, same host files, different container path, so the baked-in
+   RPATH pointed at a directory that no longer existed. Fixed with an explicit `LD_LIBRARY_PATH`,
+   not a code change. *Lesson: "verified in this environment" is scoped to the exact environment
+   it was verified under — changing that setup for a reason that has nothing to do with the thing
+   you're touching can silently invalidate an assumption (a linker path) that was never part of
+   the change being made.*
+13. **Two real bugs an ephemeral test environment hid from every prior run.** Asked to audit
+   process teardown for shared-memory leaks. Neither owner process handled `SIGTERM` — one had
+   *no* signal handling at all, meaning `kill` or Ctrl-C skipped `shm_unlink` entirely and
+   orphaned its segment in `/dev/shm`; the other handled `SIGINT` but not `SIGTERM`, which is
+   what `kill` actually sends by default and what every real process supervisor (systemd, Docker,
+   k8s) sends on shutdown. Both bugs had been live for the entire session and never once surfaced,
+   because every verification run used `docker run --rm` — an ephemeral container's `/dev/shm`
+   disappears on exit regardless of *why* the container exited, so a graceful shutdown and a
+   silently orphaned segment looked identical from outside every single time. Fixed both binaries
+   to handle `SIGINT` and `SIGTERM` identically, then verified by sending a real `SIGTERM` and
+   confirming both a clean process exit *and* an empty `/dev/shm` afterward — not just that the
+   code now compiled with a handler in it. Separately confirmed something that looked like a
+   related gap wasn't one: the Python side never calls `shm_unlink`, and *shouldn't* — it's a
+   non-owner by design, and having it unlink would be a new bug, not a fix, since it would delete
+   a segment a still-running producer depends on. *Lesson: a test environment's own convenient
+   properties (throwaway containers, `--rm`, a fresh `/dev/shm` every run) can be exactly what
+   hides a real production bug — the environment that makes verification easy isn't automatically
+   the environment that makes verification honest.*
+14. **An audit that found two real bugs and correctly refused two demanded fixes.** A second,
+   more adversarial audit specified four exact changes to make: add `#pragma pack(1)`, add
+   `_mm_pause()` to a claimed spin-wait, add `MAP_POPULATE`, add extra compiler-reordering
+   barriers. Checked each against the actual code before touching anything. Two were based on
+   incorrect premises: the structs already had zero padding (a `sizeof` `static_assert` already
+   proved it), and forcing byte-packing on them would have risked unaligned access on the exact
+   ARM64 targets this bridge is built for, for no benefit; and the hot loop doesn't spin at all
+   — it blocks on `clock_nanosleep` — so converting it to a `_mm_pause()`-throttled spin would
+   have *increased* power draw at 1 kHz, the opposite of the stated goal. Explained both
+   refusals with the actual reasoning rather than complying because the request was phrased as
+   an instruction from an authority. The other two were real: `mmap()` never used
+   `MAP_POPULATE`, and the ring buffer's payload region was never touched at construction, only
+   its indices were — fixed with an explicit prefault pass; and the cross-language ABI check
+   only compared `sizeof`, which can't catch two structs with matching size but silently
+   diverged field order — strengthened to per-field `offsetof`. Verified the real fix with a
+   before/after page-fault comparison built from git history, and the number came back showing
+   *more* faults in the patched version, not fewer — reported exactly as measured, then explained
+   precisely why that's still consistent with the fix working (the comparison's own test case
+   never reached the code path the fix targets), instead of quietly reframing the result into a
+   cleaner story. *Lesson: an audit that manufactures a finding for every demand made isn't more
+   rigorous than one that reports two real bugs and two non-issues — it's less trustworthy,
+   because it's optimizing for agreement instead of correctness.*
 ---
 ## Part 4 — What's left (the honest roadmap)
 **Not yet true, named plainly rather than implied:**
@@ -181,11 +326,37 @@ under-sampled — see war story #7 in Part 3 and Part 4 for the honest breakdown
   that lossy round-trip.
 - **No concurrency story.** Single process, single thread, one blocking `input()` loop. Serving
   more than one user at once is a different architecture, not a tuning knob.
+- **The eval suite hasn't been re-run since the tool count changed.** Wiring `submit_spatial_intent`
+  and `read_joint_states` into `main.py` took the model from 5 tools to choose from up to 7. The
+  30-case suite's 28/30 result predates that change — nothing has confirmed the extra two tools
+  leave the original five's selection behavior unaffected, only that they don't crash anything at
+  import time.
+- **No PREEMPT_RT kernel has ever run this code.** Every real-time verification (Part 11) — the
+  5M-item stress test, the SCHED_FIFO/mlockall success path, the failure path when privileges are
+  withheld — ran inside Docker Desktop on WSL2: a stock, non-PREEMPT_RT-patched kernel, itself
+  inside a VM, with no `isolcpus` core isolation configured anywhere in that stack. What's proven
+  is that the *mechanisms* work correctly and the *timing logic* doesn't drift — not any actual
+  latency bound. That number doesn't exist yet, and won't until this runs on real PREEMPT_RT
+  hardware with a genuinely isolated core.
+- **ThreadSanitizer has never actually run against this code.** It builds, but crashes on launch
+  in this specific Docker-on-WSL2 setup regardless of the two standard workarounds tried (disabling
+  ASLR, relaxing the container's seccomp profile). Read as an environment limitation, not a code
+  issue, given the same algorithm passed a real 5M-item concurrent stress test clean — but that's
+  a hypothesis resting on indirect evidence, not a TSan pass, and it stays a hypothesis until
+  re-tried somewhere the environment isn't in the way.
+- **No perception pipeline, no real hardware, no real joints.** `submit_spatial_intent` is
+  exercised today by an LLM tool call reasoning from natural language, not by a vision or
+  learned-policy model — the bridge's contract (a Pydantic schema plus a shared-memory layout)
+  doesn't care what produces the numbers, but nothing in this repo currently produces `tvec`/`rvec`
+  from vision. `JointState6` telemetry is a synthetic sine-wave stand-in published by the RT loop,
+  not real encoder feedback — there is no motor, encoder, or physical arm behind any of this yet.
 None of this is a criticism of the project's current size — it's the difference between "what
 this teaches" (real, already true) and "what this serves" (not yet attempted), stated the way
 Agroteca's own roadmap insists on: a green checkmark only where there's a run to back it up.
 ---
 ## Part 5 — The Masterclass: the system, end to end
+> This part covers the Python agent. Its counterpart for the C++/shared-memory bridge — same
+> depth, same "why," different memory model entirely — is Part 11.
 ### 5.1 — The mental model: one process, one loop, one durable log
 ```
                                      ┌──────────────┐
@@ -418,6 +589,123 @@ system where hermetic testing takes active, deliberate effort: the default way o
 is the way that leaks state between calls. Restoring hermeticity here meant swapping the
 *storage* (`MemorySaver`, gone at process end) and the *identity* (`uuid4()` per case, instead
 of one shared literal) — while leaving every other piece of the graph completely untouched.
+### 6.11 — Memory ordering, from first principles
+A modern CPU and a modern compiler are both, independently, allowed to reorder memory operations
+relative to how you wrote them in source — the compiler because it's proving the reordering
+doesn't change *single-threaded* behavior, the CPU because store buffers and out-of-order
+execution make strict in-order memory access slow. Neither promise applies once a second thread
+is reading the same memory: a reordering invisible to one thread can be very visible to another.
+`std::memory_order` is the vocabulary for telling the compiler and the CPU exactly how much
+reordering is safe to allow around a given atomic operation:
+- **`relaxed`** — atomicity only (no torn reads/writes), zero ordering guarantee relative to any
+  other memory access. Correct only when nothing else depends on *when* this specific operation
+  becomes visible relative to other operations — a thread reading its *own*, only-ever-written-by-
+  itself index is the textbook case.
+- **`acquire`** (on a load) / **`release`** (on a store) — a paired discipline: a `release` store
+  publishes everything that happened-before it in its thread; a paired `acquire` load that
+  observes that value is guaranteed to also observe every one of those prior writes, atomic or
+  not. This is the mechanism, not an approximation of it, behind every producer/consumer handoff
+  in this codebase.
+- **`seq_cst`** — the default if you don't specify anything, and strictly more expensive: it
+  additionally guarantees a single global total order across *every* `seq_cst` operation on
+  *every* atomic variable, seen identically by every thread. The ring buffer never needs this —
+  acquire/release already gives exactly the one-way happens-before edge each handoff needs, and
+  asking for a stronger, more expensive guarantee than the problem requires is itself a kind of
+  imprecision, not extra safety.
+The rule this project actually applies: `push()` reads its *own* `tail_` `relaxed` (nothing else
+writes it), checks the *other* side's index (`head_`) `acquire` (must see what the consumer did
+before freeing that slot), writes the payload as an ordinary non-atomic assignment, then
+publishes with a `release` store to `tail_`. `pop()` is the exact mirror. The payload write being
+*plain*, not atomic, is not a hole in the reasoning — the standard's release/acquire rule
+explicitly covers every memory access that happened-before the release, atomic or not, which is
+exactly what makes a "flag guards a plain payload" pattern correct instead of a cheat.
+### 6.12 — False sharing and cache-line alignment
+A CPU's cache doesn't move memory around one byte, or even one variable, at a time — it moves
+whole **cache lines** (64 bytes on essentially every mainstream x86-64/ARM64 target). If two
+*different* atomic variables happen to live on the same 64-byte line, and two different cores
+each write to their own variable, every one of those writes invalidates the *other* core's
+cached copy of the whole line — including the variable that core wasn't touching. The two writes
+are logically independent; the cache-coherency protocol (MESI, on most real hardware) doesn't
+know that, and forces a cross-core synchronization on every single write regardless. This is
+**false sharing**: a performance bug with no incorrect *result*, only a much slower one, which is
+exactly why it's easy to miss in code review and only shows up as unexplained latency under real
+contention. The fix is `alignas(64)` on each independently-written variable, forcing the compiler
+to place them on separate cache lines — turning an implicit, easy-to-violate assumption about
+memory layout into an explicit, compiler-enforced one, verified here at compile time via
+`offsetof` rather than trusted.
+### 6.13 — Complete-class context, and why `offsetof` can fail to compile
+A C++ class template is not a "complete type" — one whose size and layout the compiler has fully
+resolved — until its closing `};` has been parsed. `offsetof` requires a complete type, because
+computing a byte offset requires the compiler to already know the full layout. Writing
+`static_assert(offsetof(Foo, member))` *inside* `Foo`'s own body asks the compiler a question
+about a type it hasn't finished defining yet — a genuine chicken-and-egg problem, not a syntax
+error. The standard carves out specific **complete-class contexts** — places inside a class body
+where the compiler *does* treat the enclosing class as already complete, specifically so members
+can reference each other regardless of declaration order: default member initializers,
+`noexcept`-specifiers, and — the one that matters here — member *function bodies*. A
+`static constexpr` member function's body, even written inline in the class, is one of these
+contexts, so `offsetof` works correctly *inside* it; calling that function from a `static_assert`
+placed *after* the class closes then gets the answer safely, at a point where the type actually
+is complete on both counts.
+### 6.14 — Async-signal-safety
+A signal handler doesn't run as an ordinary function call — it can interrupt the program at
+*any* point, including in the middle of another function that isn't reentrant (`malloc`,
+`printf`, most of the standard library) or that was holding a lock the handler's own code might
+need. Calling an unsafe function from inside a handler can deadlock the process against itself,
+or corrupt state that was mid-update when the interrupt landed. POSIX defines a specific, short
+list of **async-signal-safe** functions; the C++ standard separately specifies that `std::atomic`
+operations on a *lock-free* atomic type are safe to perform inside a signal handler, because a
+lock-free implementation has no internal mutex the handler could deadlock against. This is why
+the fix for missing `SIGTERM` handling in this project is exactly `g_running.store(false,
+memory_order_relaxed)` and nothing else — not a log line, not a cleanup call, not even a
+non-lock-free atomic — with `static_assert(std::atomic<bool>::is_always_lock_free)` right next
+to it, so the one guarantee the whole approach depends on is checked by the compiler, not assumed
+by the author.
+### 6.15 — What a process death actually reclaims, and what it doesn't
+When any process exits — cleanly, by signal, or by crashing — the kernel unconditionally tears
+down that process's entire address space: every `mmap`'d region is unmapped, every open file
+descriptor is closed, every byte of heap memory is freed. This happens regardless of whether the
+program's own destructors ran, which is why a Python process that never explicitly calls
+`munmap`/`close` on a shared-memory mapping hasn't leaked anything — the kernel was always going
+to reclaim that mapping the moment the process ended, unconditionally. A **named** POSIX shared-
+memory object (`shm_open`'s name, backed by a `/dev/shm/<name>` entry) is different in kind: it
+is not a mapping, it's closer to a file, and like a file, it persists independently of any
+process's mapping of it until something explicitly calls `shm_unlink` on that name. Confusing
+these two — "did this process clean up its mapping" versus "did anyone unlink the named object" —
+is exactly the mistake that made the `SIGTERM` bugs in war story #13 real: no amount of
+kernel-guaranteed mapping cleanup removes an orphaned name from `/dev/shm` if nothing ever calls
+`shm_unlink` on it.
+### 6.16 — Real-time systems concepts: latency, jitter, and priority inversion
+**Latency** is how long a single operation takes; **jitter** is how much that duration *varies*
+across repeated operations — and for a periodic control loop, jitter usually matters more than
+raw latency, because a control law tuned for a 1 ms period degrades in proportion to how
+unpredictably that period actually lands, not just how large it is on average. A general-purpose
+OS scheduler optimizes for aggregate throughput and fairness across many processes, which is
+close to the opposite goal of minimizing worst-case jitter for one specific thread — `SCHED_FIFO`
+opts a thread out of that fairness model entirely (fixed priority, no time-slicing, runs until it
+blocks or a higher/equal-priority realtime thread preempts it). **Priority inversion** is the
+classic failure mode this class of system has to defend against: a high-priority thread blocked
+waiting on a resource a *low*-priority thread holds, while a *medium*-priority thread that needs
+neither resource preempts the low-priority holder and runs indefinitely — inverting the intended
+priority order in effect, even though every individual scheduling decision was locally correct.
+This project's hot loop sidesteps the whole problem rather than solving it: it never blocks on a
+lock at all (the ring buffer is lock-free), so there's no shared resource for a lower-priority
+thread to hold and starve it over.
+### 6.17 — Cross-language ABI stability
+An **ABI** (application binary interface) is everything a **API** doesn't specify: not just what
+a function is called and what types its arguments have, but the exact byte-for-byte memory layout
+those types compile to — field order, padding, alignment, calling convention. Two pieces of code
+compiled by *different* toolchains (or in this project's case, describing the same struct in two
+different languages) only interoperate correctly if they agree on the ABI, not just the API, and
+that agreement is invisible in the source — nothing forces `AgriosPose6D` (C) and `agrios::Pose6D`
+(C++) to actually match just because a comment says they should. `ctypes.Structure` on the Python
+side works at all because it deliberately mirrors the *platform's* native C struct-layout
+algorithm rather than inventing its own — the same reason `#pragma pack` would have been
+dangerous here (see war story #14): once one side of an ABI boundary silently diverges from
+"whatever the platform's C compiler naturally produces," every other side that still assumes the
+natural layout breaks, invisibly, until something reads garbage. `static_assert(offsetof(...))`
+comparisons across the two struct definitions are what turn "the comment says these match" into
+"the build fails the moment they don't."
 ---
 ## Part 7 — System design
 ### 7.1 — Request lifecycle, end to end
@@ -459,6 +747,30 @@ means the model's ~4.3 GB RAM requirement is a hard, literal ceiling on a specif
 that directly collided with the Langfuse Docker stack running in the background. "Free and
 local" doesn't mean "no capacity planning" — it means the capacity planning is now about your
 own machine's RAM instead of a cloud bill, and it's just as real when you hit the ceiling.
+### 7.5 — The bridge's request lifecycle: two clocks that never synchronize
+```
+Python side (irregular cadence, driven by the LLM):
+    LLM decides to call submit_spatial_intent(tvec, rvec)
+        → Pydantic validates the shape (exactly 3 floats each) before any C++ code runs
+        → ctypes marshals a _CPose6D struct, calls agrios_bridge_push() by pointer
+        → SPSCRingBuffer::push(): release-store publishes the write, or returns false if full
+        → tool result string returned to the LLM either way -- "delivered" is not "acted on"
+
+C++ side (fixed 1 kHz cadence, driven by clock_nanosleep, indifferent to Python):
+    every 1 ms: advance the absolute deadline, sleep to it
+        → agrios_bridge_pop(): acquire-load checks for a new item, non-blocking either way
+        → (if present) update last-known pose, run the control-law stand-in
+        → push synthetic joint telemetry to the second channel, non-blocking
+        → loop
+```
+Neither side ever calls into, waits on, or even knows the current state of the other — the only
+coupling is two lock-free ring buffers in shared memory, each side polling at its own pace. This
+is the concrete meaning of "asynchronous decoupling": not a design aspiration, a structural fact
+of `push()`/`pop()` both being `O(1)` and non-blocking by construction (Part 11.2). If the Python
+process pauses for a second to think through a long tool call, the control loop's 1 kHz cadence
+never even notices; if the control loop's process isn't running at all, `submit_spatial_intent`
+still returns instantly — `push()` just fails because there's nothing consuming the buffer,
+which is reported back as a plain string, not an exception.
 ---
 ## Part 8 — Library choices, and the tradeoff space around them
 ### 8.1 — Agent control flow: `StateGraph` vs. the prebuilt constructors
@@ -513,6 +825,31 @@ rather than 30 near-duplicate test functions, and `pytest.mark.slow` + `pytest.i
 separate test runner or a manual skip. `unittest` (stdlib) can express the same tests, but with
 more boilerplate per case and without a first-class marker system for the fast/slow split this
 project actually needed.
+### 8.7 — Concurrency primitive: a hand-rolled `SPSCRingBuffer` vs. a library one
+Mature lock-free queue implementations exist (`boost::lockfree::spsc_queue`,
+`moodycamel::ReaderWriterQueue`) and are better-tested than anything written for one project.
+Hand-rolling one here was a deliberate choice for a *specific* reason a library couldn't satisfy:
+this instance has to live in POSIX shared memory, be constructed via placement-new at a
+process-specific virtual address, and be laid out byte-for-byte identically for a C ABI and a
+Python `ctypes.Structure` to reinterpret — a use case general-purpose lock-free libraries aren't
+designed around (they assume one process, one address space, and don't expose or guarantee their
+internal layout as a stable ABI). The tradeoff accepted in exchange: a battle-tested library has
+had far more adversarial review than one afternoon's stress test and two audits — which is
+exactly why the verification burden (Part 11.6) fell on this project instead of being inherited.
+### 8.8 — Verification methodology: a real Linux container instead of "should work on Linux"
+POSIX shared memory doesn't exist on the Windows machine this project is developed on, and
+`cmake`'s platform guard refuses to even configure anywhere but Linux/macOS — meaning every claim
+made about the bridge had to be backed by an actual Linux execution, not a code read on Windows
+plus an assumption. Docker was the pragmatic choice over a full Linux VM or dual-boot: fast to
+spin up and tear down per verification pass, close enough to a real target (a real Linux kernel,
+real POSIX syscalls) for everything except kernel-level real-time behavior itself (Part 4's
+PREEMPT_RT caveat exists precisely because Docker-on-WSL2 is *not* close enough for that specific
+claim). The cost of that choice showed up twice: ThreadSanitizer's launch crash was plausibly a
+Docker-on-WSL2-specific limitation, not provably a code issue (war story, Part 11.6); and an
+ephemeral `--rm` container's own convenient property — a fresh `/dev/shm` every run — is exactly
+what hid the SIGTERM leak for an entire session (war story #13). A verification environment's
+own conveniences are not neutral; they can suppress the exact class of bug they're least
+convenient at catching.
 ---
 ## Part 9 — Q&A: pressure-testing the design
 > The same self-check Part 10 recommends for the syllabus, applied to this project directly.
@@ -589,6 +926,46 @@ project actually needed.
   docstring was the one case the model answered from memory instead of calling the tool. The
   instinct to verify a plausible-sounding explanation instead of shipping it is the same one that
   caught Agroteca's disproved embedder hypothesis — just far cheaper to run here.*
+- **Why acquire/release instead of the default `seq_cst`, and why not just use a mutex?** → *A
+  mutex would work, but adds a syscall-capable lock to a path whose entire purpose is bounded,
+  predictable latency — and a mutex's internal state (a futex word, typically) isn't guaranteed
+  portable across the process boundary this buffer has to cross. `seq_cst` would also work, but
+  pays for a global total-order guarantee the algorithm never needs — every handoff here only
+  needs one-way happens-before between exactly two operations on exactly one atomic variable,
+  which is precisely what `acquire`/`release` gives for less cost. Using the strongest available
+  ordering by default isn't the safe choice, it's the imprecise one — it just happens to also be
+  correct, which can hide that the reasoning behind *why* it's correct was never actually done.*
+- **How do you know the ring buffer is actually correct, not just "looks right"?** → *A single-
+  threaded read of `push()`/`pop()` can look obviously correct and still hide a race that only a
+  real scheduler, under real contention, exposes — so the correctness claim rests on a real
+  producer thread against a real consumer thread, 5,000,000 items through a deliberately small
+  256-slot buffer to force constant index wraparound, checked for lost, duplicated, or reordered
+  items. It's also meant to run under ThreadSanitizer for real happens-before-graph analysis, not
+  just a stress test's lucky pass — that specific verification is still an open gap (Part 4), and
+  I say so rather than letting the stress test's pass stand in for it.*
+- **Walk through what happens if the Python process is killed mid-push.** → *Nothing on the C++
+  side notices or needs to — `push()` either completed (a full release-store landed) or it
+  didn't (the process died before the store), and there's no partial, half-visible state a
+  release/acquire-correct algorithm can produce in between; the consumer either sees the new item
+  or it doesn't yet, never a torn one. The Python process's own shared-memory mapping and file
+  descriptor are reclaimed unconditionally by the kernel the moment it exits — and since Python
+  is never the owner of either channel (Part 11.3), there's no `shm_unlink` responsibility to
+  worry about losing either.*
+- **What would you check first if the RT loop's jitter suddenly got worse?** → *Whether the
+  measurement environment changed before assuming the code did — this project's own jitter
+  numbers were never claimed as a real-time performance bound precisely because they were
+  measured on a non-PREEMPT_RT kernel inside a VM, where "worse" could mean host CPU contention,
+  a WSL2 scheduling quirk, or a dozen things with nothing to do with this code. The actual
+  process: reproduce on the same environment used before, then change one variable — is it a
+  regression in the code, or in the noise floor it's being measured against.*
+- **Why does the joint-telemetry channel drain to the newest sample instead of returning them in
+  order?** → *Because the two channels answer different questions. The pose channel is FIFO on
+  purpose — every intent a caller pushes matters, and silently dropping a stale one would be a
+  real behavior change. "What's the robot's current joint state" is a different question with a
+  different right answer: only the freshest reading is meaningful, and returning a queued-up old
+  one first would mean reporting stale state as current. Same primitive, opposite drain policy,
+  because the two consumers actually want different things — not an inconsistency, a design
+  decision made once and named.*
 ---
 ## Part 10 — Concepts to master (the syllabus)
 > The checklist to own this subject generally, not just this repo.
@@ -627,16 +1004,247 @@ project actually needed.
   default, and what "opt out of the product's own feature" looks like in test code.*
 - Parametrized testing across categorized failure modes, not just one happy-path check.
 - Gating slow/live/non-deterministic tests behind an opt-in marker.
+**Concurrency & lock-free programming**
+- `std::memory_order`: `relaxed`/`acquire`/`release`/`seq_cst`, and choosing the weakest one
+  that's still correct rather than the strongest one that's safe by default — *Part 6.11.*
+- False sharing and cache-line alignment — *a correctness-adjacent performance bug with no
+  wrong answer, only a slow one, Part 6.12.*
+- Single-producer/single-consumer ring buffers: index math via power-of-two capacity and bitwise
+  AND, the full-vs-empty ambiguity, why exactly one unused slot resolves it.
+- Compile-time layout verification (`static_assert(offsetof(...))`) and complete-class context —
+  *Part 6.13.*
+- Concurrency stress testing: forcing the failure mode instead of hoping a run reveals it, and
+  the specific way a build-flag default (`NDEBUG`) can make a test pass by checking nothing —
+  *war story #9.*
+**Real-time & embedded systems**
+- `mlockall`, stack pre-faulting, `MAP_POPULATE` — what each does and doesn't guarantee about
+  page residency, and why "doesn't guarantee" is worth being precise about, not rounding up to
+  "prevents."
+- `SCHED_FIFO`/`SCHED_RR` vs. the default fair scheduler, and priority inversion — *Part 6.16.*
+- CPU affinity vs. core isolation (`isolcpus`/`nohz_full`/`rcu_nocbs`) — two different, easily
+  conflated claims.
+- Absolute-deadline scheduling (`clock_nanosleep(..., TIMER_ABSTIME, ...)`) vs. relative-sleep
+  drift accumulation.
+- Async-signal-safety: what a signal handler is actually allowed to touch, and why — *Part 6.14.*
+**Cross-process & cross-language systems**
+- POSIX shared memory lifecycle: `shm_open`/`mmap`/`munmap`/`shm_unlink`, and the distinction
+  between a per-process mapping (kernel-reclaimed automatically) and a named object (persists
+  until explicitly unlinked) — *Part 6.15.*
+- ABI vs. API: byte-for-byte layout compatibility across a language boundary, and why "the
+  platform's native struct layout" is the actual contract `ctypes.Structure` and a packed
+  struct both either honor or silently break — *Part 6.17.*
+- Owner/non-owner topology for a shared resource with exactly one creator and multiple attachers.
+**Databases**
+- Connection pooling: what it solves, and being honest about whether your current scale needs
+  it — *vs. the abstraction-boundary value that's real regardless of scale.*
+- Relative vs. anchored file paths — *an environment property vs. a code invariant.*
+**Observability**
+- Structured logging vs. distributed tracing — *different tools, different lifetimes, different
+  jobs.*
+- Callback/hook patterns for instrumenting a system without modifying its core logic.
+- Getting telemetry out of a latency-critical path without the telemetry itself becoming the
+  latency source — *the second lock-free channel pattern, Part 11.5.*
 **The frontiers to grow into**
-- Actually running the eval suite and scoring it — *the very next step this project hasn't
-  taken yet.*
 - Testing the Postgres swap for real, not just structuring code to make it plausible.
 - Structured (typed) tool outputs instead of stringified data.
 - Token-level streaming to a user-facing surface, not just the internal transport.
 - Multi-user session handling — *a real `thread_id` source instead of a literal.*
 - Human-in-the-loop / interrupt patterns — *a natural next node type, given the graph is
   already built to add one.*
+- Re-running the 30-case eval suite now that the tool count changed from five to seven.
+- Actually running any part of the real-time bridge on a PREEMPT_RT-patched kernel with a
+  genuinely isolated core — *the one verification this project structurally cannot do on its
+  current dev machine, named as exactly that rather than implied to be done.*
+- ThreadSanitizer, on an environment where it can actually launch.
+- Wiring a real perception source (even a webcam + ArUco, well short of a learned policy) into
+  `submit_spatial_intent` in place of the LLM tool call that exercises it today.
 > **How to use this part:** for each unfamiliar line, write a one-paragraph note in your own
 > words, then find or write the smallest possible experiment that proves it. That's the same
 > loop that built the rest of this project — writing the fix is how you find out whether you
-> actually understood the bug.
+> actually understood the bug. Part 11 is that experiment, already run, for everything above
+> that isn't Python.
+---
+## Part 11 — The real-time bridge, end to end
+> Part 5's counterpart for `cpp/` and `spatial_tools.py`. Same standard as everywhere else in
+> this document: every claim below is either backed by a specific file/line, or explicitly
+> marked as not yet verified — see Part 4 and 11.6 for exactly which is which.
+### 11.1 — The mental model: two processes, two clocks, no shared runtime
+There is no framework here binding the two halves together — no RPC layer, no message broker, no
+serialization format. There are two operating-system processes that never call into each other,
+each mapping the *same* named region of physical memory into their own, independently-addressed
+virtual memory, and treating a fixed byte layout inside that region as a lock-free queue. Python
+runs at whatever irregular cadence the LLM decides to call a tool; the C++ side runs at a fixed
+1 kHz forever, indifferent to whether anything on the other end is alive. See Part 7.5 for the
+two clocks laid out side by side. The closest analogy inside this same repo is `SqliteSaver`
+(Part 5.4) — a durable, out-of-process store two independent things read and write — except here
+the "store" is a lock-free ring buffer in RAM instead of a file on disk, and the two readers/
+writers are racing each other on purpose, at nanosecond granularity, rather than taking turns.
+### 11.2 — The lock-free algorithm, in full
+```cpp
+bool push(const T& item) noexcept {
+    const std::size_t tail = tail_.load(std::memory_order_relaxed);      // (1)
+    const std::size_t next_tail = (tail + 1) & kMask;                    // (2)
+    if (next_tail == head_.load(std::memory_order_acquire)) {            // (3)
+        return false;  // full
+    }
+    buffer_[tail] = item;                                                 // (4)
+    tail_.store(next_tail, std::memory_order_release);                    // (5)
+    return true;
+}
+```
+1. **Relaxed load of `tail_`.** Safe because `tail_` is *producer-owned* — no other thread ever
+   writes it, so there's nothing for this thread to synchronize with when reading its own,
+   only-ever-self-written value.
+2. **Index wraparound via bitwise AND**, not modulo — valid only because `Capacity` is enforced
+   to be a power of two (`static_assert`), which turns `(tail + 1) % Capacity` into the
+   single-instruction `(tail + 1) & (Capacity - 1)`.
+3. **Acquire-load of `head_`**, the *consumer's* index. This is the one load in `push()` that has
+   to synchronize with the other thread: if this observes that the consumer has advanced `head_`
+   past a given slot, it must also observe every memory effect the consumer performed *before*
+   advancing it — otherwise the producer could overwrite a slot the consumer is still mid-read on.
+4. **The payload write is plain, not atomic.** This is correct, not an oversight — see Part 6.11:
+   the release/acquire pair around it is what makes this write visible to the consumer, atomicity
+   on the write itself was never the mechanism doing the work.
+5. **Release-store of the new `tail_`.** This is the publish step: everything written before this
+   line in program order (specifically, step 4) is now guaranteed visible to any thread whose
+   acquire-load of `tail_` observes this exact value.
+`pop()` is the exact mirror — relaxed-load its own `head_`, acquire-load the *producer's* `tail_`
+to check for new data, read the payload, release-store the advanced `head_`. Two threads, four
+atomic operations total across a full push/pop cycle, zero locks, zero syscalls.
+### 11.3 — Cache-line placement and the compile-time layout contract
+`head_`, `tail_`, and the payload array `buffer_` each carry `alignas(kCacheLineSize)` (a fixed
+64, not `std::hardware_destructive_interference_size` — GCC explicitly warns that value can
+change across compiler versions or `-mtune` flags, which matters here because this *is* an ABI
+boundary another language reads, not an internal implementation detail free to shift). The
+resulting offsets (`head_` at 0, `tail_` at 64, `buffer_` at 128) aren't just documented, they're
+`static_assert`-checked against `offsetof` on a real instantiation — Part 6.13 covers exactly why
+that check had to be written as a member *function*, not inline in the class body, after it first
+failed to compile. `bridge_c_api.cpp` separately `static_assert`s that the C-ABI struct
+(`AgriosPose6D`) and the C++ struct (`agrios::Pose6D`) agree on *every field's* `offsetof`, not
+just their combined `sizeof` — the distinction that mattered in war story #14, where a
+size-only check would have missed a hypothetical field-order divergence that a per-field check
+can't.
+### 11.4 — POSIX shared memory: the owner/non-owner lifecycle
+```
+Owner (exactly one process, whichever starts first):
+  shm_unlink(name)        -- clear a stale segment from a crashed prior run; ENOENT is fine
+  shm_open(name, O_CREAT) -- create the named object
+  ftruncate(fd, sizeof(Buffer))
+  mmap(..., MAP_SHARED | MAP_POPULATE)
+  memset(addr, 0, sizeof(Buffer))   -- write-touch every page; owner, so safe to zero
+  new (addr) Buffer()               -- placement-construct head_=0, tail_=0
+
+Non-owner (every other attaching process):
+  shm_open(name, O_RDWR)  -- attach to the existing object, no O_CREAT
+  mmap(..., MAP_SHARED | MAP_POPULATE)
+  read-touch every page   -- establish this process's own page-table entries;
+                              must NOT write -- would corrupt live queue state
+  reinterpret_cast<Buffer*>(addr)   -- reuse the object the owner already constructed
+```
+Two distinct resources are in play, and conflating them is exactly the mistake war story #13
+was built on: the **mapping** (`mmap`'s return value) is per-process and the kernel reclaims it
+unconditionally on exit, no matter how the process dies; the **named object**
+(`/dev/shm/<name>`) is not per-process, and persists until something explicitly calls
+`shm_unlink` on it — see Part 6.15. Only the owner ever calls `shm_unlink`, in its destructor
+*and* defensively before creating (to clear a segment orphaned by an earlier crash) — a
+non-owner calling it would delete a name a still-running producer might depend on, which is
+precisely why the audit in war story #13 fixed the *signal handling* that was skipping the
+owner's own `shm_unlink`, not added one to the Python side.
+### 11.5 — Real-time thread hardening, and what each piece actually buys
+`configure_current_thread_realtime()` runs these steps, in this order, as the literal first
+thing the RT thread's body does:
+1. **`mlockall(MCL_CURRENT | MCL_FUTURE)`** — no page of this process, current or future, can be
+   swapped out once this succeeds. It does *not* guarantee a page is *populated* before its first
+   touch (Part 6.15's mapping-vs-population distinction again, in a different guise) — which is
+   exactly why step 2 exists.
+2. **Explicit stack pre-fault** — a large stack-local buffer is written to once, forcing the
+   pages behind it to be resident before the hot loop can hit an un-faulted page from an
+   unusually deep call. Requires the thread to have been created with an explicitly oversized
+   stack in the first place (`make_realtime_thread_attr`), not the platform default — a default
+   stack size sized for "normal" code isn't guaranteed to have room for this pre-fault pass on
+   top of the loop's own usage.
+3. **`SCHED_FIFO`, priority 99** — fixed-priority, no time-slicing; this thread runs until it
+   blocks or something equal-or-higher-priority preempts it, unlike the default fair scheduler's
+   time-sliced sharing. Priority 99 is worth knowing, not just using: it's the same priority
+   Linux gives several of its own kernel housekeeping threads, so a misbehaving thread at 99 can
+   starve kernel-internal work — real deployments commonly reserve 99 and run application code at
+   90–98. This code uses 99 because that was the spec, which is worth distinguishing from "because
+   it's the right default."
+4. **`pthread_setaffinity_np()`** pinned to a chosen core — and pinning is *not* isolation
+   (Part 6.16). Without also booting the kernel with `isolcpus=`/`nohz_full=`/`rcu_nocbs=` for
+   that core, the scheduler can still place other work there between this thread's slices. That
+   configuration is a host-kernel-boot-parameter prerequisite this code cannot set up or verify
+   from inside one process.
+Every one of those four calls can legitimately fail on an unprivileged process (`CAP_SYS_NICE`/
+`CAP_IPC_LOCK` or root, neither granted to a default Docker container even running as root) —
+`configure_current_thread_realtime` returns a hard failure with the specific reason rather than a
+best-effort bool, and `motor_control_rt_loop.cpp` exits rather than proceeding when it fails. A
+control loop that silently continues at normal scheduling after asking for real-time guarantees
+and not getting them would fail exactly when the load it was hardened for finally showed up —
+verified directly in war story-adjacent testing (Part 11.6) by removing the capabilities and
+confirming the refusal, not assumed from the code.
+Inside the loop itself: `clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, nullptr)`
+against a deadline advanced by exactly one period each iteration, not a relative `sleep_for` —
+a relative sleep re-measured from "now" bakes that iteration's own execution time into the next
+wait, so drift accumulates without bound over a long run; an absolute, monotonically-advancing
+deadline doesn't. Telemetry (per-iteration jitter, whether a pose arrived) exits the hot loop
+through a *second*, in-process instantiation of the exact same `SPSCRingBuffer<T,Capacity>`
+already proven correct in 11.2/11.6 — reused for a thread-to-thread pairing this time instead of
+a cross-process one — drained by a separate, ordinary-priority monitor thread that owns all the
+actual `std::cout` calls the RT thread itself is forbidden from making. This is the same shape as
+ROS 2 control's `RealtimeBuffer`/`RealtimePublisher`: get state out of a real-time loop without
+letting a logger's I/O jitter leak back into the loop's own timing.
+### 11.6 — Verification: what was actually run, and the explicit line where it stops
+- **The algorithm.** A real producer thread against a real consumer thread, 5,000,000 items
+  through a deliberately small 256-slot buffer forcing constant wraparound — zero lost,
+  duplicated, or reordered items, clean under `-Wall -Wextra -Werror`. `ThreadSanitizer` was
+  attempted for real happens-before verification beyond a stress test's lucky pass, and crashed
+  on launch in this specific Docker-on-WSL2 setup regardless of the two standard workarounds
+  tried — read as an environment limitation given the stress test's own result, but that read is
+  a hypothesis, stated as one, not upgraded to a fact because it's convenient.
+- **The bridge, cross-process and cross-language, live.** A real `motor_control_rt_loop` process
+  running; a *separate* Python process importing the real `spatial_tools` module and calling the
+  real `@tool`-decorated functions, not a mock — `submit_spatial_intent` delivered a pose,
+  independently confirmed by the RT loop's own telemetry log switching from `pose=no` to
+  `pose=yes` at the exact iteration the push landed; `read_joint_states` then read a live sample
+  back from that same process.
+- **The real-time mechanisms, both directions.** `mlockall`/`SCHED_FIFO(99)`/affinity all
+  succeeding when the right capabilities were granted, *and* the loop correctly refusing to start
+  and reporting why when they weren't — tested by actually removing the capabilities, not assumed.
+- **Jitter numbers: measured, and explicitly not a real-time performance claim.** 76 μs average,
+  up to several hundred microseconds to low milliseconds worst-case depending on the run — all of
+  it measured inside Docker Desktop on WSL2, a stock non-PREEMPT_RT kernel, inside a VM, with no
+  `isolcpus` core isolation anywhere in that stack. What's proven: the mechanisms work once
+  granted privileges, and the absolute-deadline timing logic doesn't drift over a sustained run.
+  What's not proven, and isn't claimed: any actual latency bound — that needs real PREEMPT_RT
+  hardware and a genuinely isolated core to mean anything (Part 4).
+- **Two adversarial audits, not just optimistic re-verification.** War stories #13 and #14 in
+  full — two real bugs found and fixed (a `SIGTERM`-handling gap that had been masked by every
+  prior ephemeral-container test run; a missing `MAP_POPULATE`/prefault pass), two demanded
+  "fixes" correctly declined with technical reasoning (`#pragma pack`, a busy-spin conversion),
+  and one measurement (a page-fault comparison) that came back showing the opposite of a lazy
+  read's expectation and was reported exactly as measured, not reframed.
+### 11.7 — The LangGraph integration layer: where the two systems actually meet
+`spatial_tools.py` is the one file that imports from both worlds — `langchain_core.tools` and
+`pydantic` on one side, `cpp/python/shared_ring_buffer.py`'s `ctypes` wrapper on the other — and
+it's deliberately kept out of `main.py`, because its dependency footprint (a compiled `.so`,
+POSIX shared memory) is fundamentally different from every other tool's (SQLAlchemy, string
+fixtures). Three things make this integration layer safe rather than merely functional:
+- **Validation before any C++ code runs at all.** `SubmitSpatialIntent`'s Pydantic model types
+  `tvec`/`rvec` as `tuple[float, float, float]`, not `list[float]` — Pydantic v2 validates tuple
+  arity exactly, so the generated JSON schema (`prefixItems`, `minItems`/`maxItems` both 3)
+  rejects a malformed call from the model before `ctypes` ever marshals a byte.
+- **Lazy connections, so a missing C++ side degrades instead of crashing.** `_pose_bridge`/
+  `_joint_bridge` are module-level, initialized to `None`, and only opened on first tool
+  invocation — `shared_ring_buffer.py`'s `_load_library()` isn't called at import time, so
+  importing `spatial_tools` (and therefore `main.py`) never requires `libagrios_bridge.so` to
+  exist. On this project's own Windows dev machine, where POSIX shared memory structurally can't
+  exist, both tools import fine and simply report "bridge not available" as a plain string result
+  when actually called — verified directly, not assumed from the lazy-import pattern being a good
+  idea in general.
+- **A result that distinguishes "delivered" from "acted on."** `push()` returning `true` only
+  means there was room in the ring buffer — it says nothing about whether anything is actually
+  reading it. `submit_spatial_intent`'s return string is explicit about which of those happened,
+  because silently accepting a spatial command that will never be executed is exactly the kind of
+  failure that should be surfaced to whatever's calling the tool, not swallowed into a generic
+  "success."
