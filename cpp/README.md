@@ -6,10 +6,10 @@ process across a POSIX shared-memory segment (`shm_open`/`mmap`) — no kernel
 round-trip, no serialization, no lock, on the hot path between "perception
 sees something" and "motor control reacts to it."
 
-This exists to close a specific gap in the rest of the Agrios/Agroteca/
-Agroscopio portfolio: none of it touches physical hardware or a real-time
-control loop. This is the first piece that's meant to eventually run on real
-robotics-class hardware (a Raspberry Pi or Jetson), not just a laptop.
+This exists to close a specific gap in the rest of Agrios and its sibling
+projects: none of them touch physical hardware or a real-time control loop.
+This is the first piece that's meant to eventually run on real robotics-class
+hardware (a Raspberry Pi or Jetson), not just a laptop.
 
 **Requires Linux or macOS.** POSIX shared memory doesn't exist on native
 Windows. Build under WSL, a Linux container, or a real Linux/macOS host —

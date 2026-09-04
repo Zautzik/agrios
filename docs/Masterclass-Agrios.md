@@ -14,7 +14,7 @@
 > *why the ideas underneath it work*, explained as if teaching them to someone who's never
 > seen an agent framework before.
 ---
-## Part 0 — The one-sentence pitch
+## Part 0 — The one-sentence summary
 > *"Agrios is a LangGraph ReAct-style agent for farm operations, running entirely on a local
 > Ollama model: five tools, a hand-written state graph instead of a black-box `.run()` call,
 > SQL-backed persistence that survives a restart, full tracing, and exception handling scoped
@@ -28,8 +28,8 @@ all of them out by hand, once, on purpose, specifically so each one could be und
 than assumed.
 ---
 ## Part 1 — Skills inventory
-Depth is marked honestly: **solid** (could defend it at a whiteboard) · **developing** (understand
-it, want more reps).
+Depth is marked honestly: **solid** (could explain and defend it under direct questioning) ·
+**developing** (understand it, want more reps).
 ### 1A. Technical / hard skills
 | Skill | What I can now do | Depth |
 |---|---|---|
@@ -49,7 +49,7 @@ it, want more reps).
 | **Python craft in service of the above** | `TypedDict` + `Annotated` for typed, reducer-aware state; decorators (`@tool`); context managers (`with engine.connect()`, `with SqliteSaver.from_conn_string(...)`); dict-merge semantics; f-strings; `if __name__ == "__main__"` | solid |
 | **Git workflow** | Five commits, each a coherent unit of work with a rationale in the message — not "fix stuff" | solid |
 ### 1B. Cognitive habits
-These outlast this specific stack. An interviewer can teach a hire `SqliteSaver`; these are harder to teach.
+These outlast this specific stack. Anyone can pick up `SqliteSaver` in an afternoon; these are harder to learn.
 | Habit | The move | Where I did it |
 |---|---|---|
 | **Read the source, not the stack trace** | When a caught-exception assumption turned out wrong, went into the `ollama` client's actual code instead of widening the `except` | The `httpx.ConnectError` bug — two code paths, two different exception contracts, found at specific line numbers |
@@ -76,7 +76,7 @@ Langfuse stack, and checked by a 30-case suite that's now actually been run and 
 correct on reconciliation, one confirmed reproducible tool-selection gap, one open question still
 under-sampled — see war story #7 in Part 3 and Part 4 for the honest breakdown.
 ---
-## Part 3 — War stories (interview-ready — know 3-4 cold)
+## Part 3 — War stories
 1. **The stale interpreter.** A `NameError` kept firing against code that, on inspection, no
    longer had the bug. The file on disk was already fixed — the process actually executing was
    a stale one from an earlier run. *Lesson: when behavior doesn't match the code you're
@@ -323,9 +323,9 @@ against an in-memory checkpointer with a fresh thread per case, gated behind a `
 the live-model cost is opt-in rather than automatic.
 ---
 ## Part 6 — Concepts from first principles
-> Master this part and you can defend any design choice above at a whiteboard, in a system this
-> size or one a hundred times larger — none of these ideas are specific to farming, Ollama, or
-> even LangGraph.
+> Master this part and you can defend any design choice above under direct questioning, in a
+> system this size or one a hundred times larger — none of these ideas are specific to farming,
+> Ollama, or even LangGraph.
 ### 6.1 — Graphs and state machines
 A **graph** here means the formal object: a set of nodes (units of work) and edges (allowed
 transitions between them). This project's graph is **cyclic**, not a DAG (directed *acyclic*
@@ -514,8 +514,12 @@ separate test runner or a manual skip. `unittest` (stdlib) can express the same 
 more boilerplate per case and without a first-class marker system for the fast/slow split this
 project actually needed.
 ---
-## Part 9 — Interview question bank
-- **Walk me through the architecture.** → *A `StateGraph` with two nodes — `agent`, which calls
+## Part 9 — Q&A: pressure-testing the design
+> The same self-check Part 10 recommends for the syllabus, applied to this project directly.
+> If a question below can't be answered without re-reading the code, that's the honest signal
+> to go back and close the gap — the point isn't the answer on the page, it's whether it's
+> already load-bearing in your own head.
+- **What's the architecture, end to end?** → *A `StateGraph` with two nodes — `agent`, which calls
   the model with the running message history and its bound tools, and `tools`, which executes
   whichever tools the model requested. A conditional edge checks the model's last response for
   `tool_calls`: present, route back to `tools`; absent, exit to `END`. State persists per
@@ -548,7 +552,7 @@ project actually needed.
   guessing) that its streaming and non-streaming code paths raise different exception types for
   the same underlying failure — the fix was adding exactly the one type that was missing, not
   widening the catch.*
-- **Tell me about a bug you're proud of finding.** → *An `except (ResponseError,
+- **Which bug is most worth remembering, and why?** → *An `except (ResponseError,
   ConnectionError)` block looked complete but a real connection-refused crash slipped through
   it. `ChatOllama` uses `ollama`'s streaming code path, which — unlike the non-streaming path —
   doesn't wrap `httpx.ConnectError` before it propagates. Found by reading the library's source
@@ -571,12 +575,12 @@ project actually needed.
   honest cost, which I've actually hit: a hard RAM ceiling that collided with other things
   running on the same machine, and tool-calling reliability behind what a frontier hosted model
   would give you.*
-- **What surprised you building this?** → *That the two hardest bugs — the exception-contract
+- **What was the most surprising thing about building this?** → *That the two hardest bugs — the exception-contract
   gap and the CWD-relative path — were both cases where the code looked obviously correct and
   the actual failure lived one layer down, in a library's internals or in an environment
   assumption neither the code nor a casual read would surface. Both needed reading source, not
   re-reading my own file harder.*
-- **Tell me about a time you tested your own hypothesis, not just your code.** → *My eval
+- **What's an example of testing a hypothesis, not just the code?** → *An eval
   suite's first real run failed a case I expected to be trivial. My first explanation was a
   cold-start effect — it was the first live model call of the session. Instead of writing that
   down, I reran the identical case alone, twice more, in fresh processes. It failed both times.
